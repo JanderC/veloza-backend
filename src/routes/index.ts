@@ -1,0 +1,32 @@
+import { Router } from "express";
+import { authRouter } from "./auth.routes";
+import { transaccionesRouter } from "./transacciones.routes";
+import { tercerosRouter } from "./terceros.routes";
+import { monedasRouter } from "./monedas.routes";
+import { tasasRouter } from "./tasas.routes";
+import { cuentasPorCobrarRouter } from "./cuentasPorCobrar.routes";
+import { cuentasPorPagarRouter } from "./cuentasPorPagar.routes";
+import { cuentasCorrientesRouter } from "./cuentasCorrientes.routes";
+import { cajasRouter } from "./cajas.routes";
+import { cierreCajaRouter } from "./cierreCaja.routes";
+import { reportesRouter } from "./reportes.routes";
+import { metodosPagoRouter } from "./metodosPago.routes";
+import { usuariosRouter } from "./usuarios.routes";
+import { whatsappRouter } from "./whatsapp.routes";
+
+export const router = Router();
+
+router.use("/auth", authRouter);
+router.use("/transacciones", transaccionesRouter);
+router.use("/terceros", tercerosRouter);
+router.use("/monedas", monedasRouter);
+router.use("/tasas", tasasRouter);
+router.use("/cuentas-por-cobrar", cuentasPorCobrarRouter);
+router.use("/cuentas-por-pagar", cuentasPorPagarRouter);
+router.use("/cuentas-corrientes", cuentasCorrientesRouter);
+router.use("/cajas", cajasRouter);
+router.use("/cierres-caja", cierreCajaRouter);
+router.use("/reportes", reportesRouter);
+router.use("/metodos-pago", metodosPagoRouter);
+router.use("/usuarios", usuariosRouter);
+router.use("/whatsapp", whatsappRouter);

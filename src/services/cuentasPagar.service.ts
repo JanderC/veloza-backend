@@ -1,6 +1,7 @@
 import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
+import { exigirTurnoAbierto } from "./cierreCaja.service";
 
 interface CrearCuentaPorPagarInput {
   terceroId: number;
@@ -76,6 +77,8 @@ export async function registrarAbonoPagar(input: RegistrarAbonoPagarInput) {
       `INSERT INTO abonos_cuenta (cuenta_por_pagar_id, monto) VALUES ($1, $2) RETURNING *`,
       [cuenta.id, monto.toFixed(4)]
     );
+
+    await exigirTurnoAbierto(client, input.cajaId, cuenta.moneda_id);
 
     const saldoCajaResult = await client.query(
       `SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`,

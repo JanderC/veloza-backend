@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { pool } from "../db/pool";
+import { env } from "../config/env";
 
 export const authRouter = Router();
 
@@ -30,7 +31,7 @@ authRouter.post("/login", async (req, res, next) => {
       return res.status(401).json({ error: "Credenciales inválidas" });
     }
 
-    const token = jwt.sign({ id: usuario.id, rol: usuario.rol }, process.env.JWT_SECRET as string, {
+    const token = jwt.sign({ id: usuario.id, rol: usuario.rol }, env.JWT_SECRET, {
       expiresIn: "8h",
     });
 

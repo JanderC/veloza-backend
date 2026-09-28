@@ -1,10 +1,8 @@
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
+import "./config/env";
 import { router } from "./routes";
 import { errorHandler } from "./middleware/errorHandler";
-
-dotenv.config();
 
 const app = express();
 app.use(cors());

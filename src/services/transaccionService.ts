@@ -1,6 +1,7 @@
 import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
+import { exigirTurnoAbierto } from "./cierreCaja.service";
 
 // ---------- Helper compartido: UN movimiento de caja ----------
 async function aplicarMovimientoLeg(
@@ -15,6 +16,8 @@ async function aplicarMovimientoLeg(
     metodoPagoId?: number;
   }
 ) {
+  await exigirTurnoAbierto(client, params.cajaId, params.monedaId);
+
   const saldoResult = await client.query(
     `SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`,
     [params.cajaId, params.monedaId]

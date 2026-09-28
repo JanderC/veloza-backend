@@ -1,6 +1,7 @@
 import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
+import { exigirTurnoAbierto } from "./cierreCaja.service";
 
 interface CrearCuentaPorCobrarInput {
   terceroId: number;
@@ -81,6 +82,8 @@ export async function registrarAbonoCobrar(input: RegistrarAbonoCobrarInput) {
     );
 
     // El pago del cliente entra a la caja como INGRESO
+    await exigirTurnoAbierto(client, input.cajaId, cuenta.moneda_id);
+
     const saldoCajaResult = await client.query(
       `SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`,
       [input.cajaId, cuenta.moneda_id]

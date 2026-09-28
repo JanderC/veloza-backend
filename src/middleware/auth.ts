@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import jwt, { JwtPayload } from "jsonwebtoken";
+import { env } from "../config/env";
 
 export interface AuthUser {
   id: number;
@@ -37,7 +38,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   }
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET as string);
+    const payload = jwt.verify(token, env.JWT_SECRET);
 
     if (!esPayloadDeUsuario(payload)) {
       return res.status(401).json({ error: "Token inválido o expirado" });

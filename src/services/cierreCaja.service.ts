@@ -1,5 +1,22 @@
+import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
+
+/**
+ * Bloquea cualquier movimiento de caja si esa caja+moneda no tiene turno
+ * ABIERTO. Se llama DENTRO de la transacción del movimiento: el FOR SHARE
+ * mantiene el turno bloqueado hasta el COMMIT, así cerrarCaja (FOR UPDATE)
+ * espera a que termine y su saldo_esperado ya incluye este movimiento.
+ */
+export async function exigirTurnoAbierto(client: PoolClient, cajaId: number, monedaId: number) {
+  const result = await client.query(
+    `SELECT id FROM cierres_caja WHERE caja_id = $1 AND moneda_id = $2 AND estado = 'ABIERTA' FOR SHARE`,
+    [cajaId, monedaId]
+  );
+  if (result.rows.length === 0) {
+    throw Object.assign(new Error("La caja no tiene un turno abierto en esta moneda"), { status: 409 });
+  }
+}
 
 interface AbrirCajaInput {
   cajaId: number;
@@ -49,32 +66,45 @@ interface CerrarCajaInput {
  * sincronizado por cada operación atómica). diferencia = real - esperado.
  */
 export async function cerrarCaja(input: CerrarCajaInput) {
-  const cierreResult = await pool.query(`SELECT * FROM cierres_caja WHERE id = $1`, [input.cierreId]);
-  const cierre = cierreResult.rows[0];
-  if (!cierre) {
-    throw Object.assign(new Error("Cierre no encontrado"), { status: 404 });
-  }
-  if (cierre.estado === "CERRADA") {
-    throw Object.assign(new Error("Este turno ya está cerrado"), { status: 409 });
-  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
 
-  const saldoActualResult = await pool.query(`SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2`, [
-    cierre.caja_id,
-    cierre.moneda_id,
-  ]);
-  const saldoEsperado =
-    saldoActualResult.rows.length > 0 ? new Decimal(saldoActualResult.rows[0].monto) : new Decimal(0);
-  const saldoReal = new Decimal(input.saldoReal);
-  const diferencia = saldoReal.minus(saldoEsperado);
+    // FOR UPDATE espera a que terminen los movimientos en curso (FOR SHARE en exigirTurnoAbierto)
+    const cierreResult = await client.query(`SELECT * FROM cierres_caja WHERE id = $1 FOR UPDATE`, [input.cierreId]);
+    const cierre = cierreResult.rows[0];
+    if (!cierre) {
+      throw Object.assign(new Error("Cierre no encontrado"), { status: 404 });
+    }
+    if (cierre.estado === "CERRADA") {
+      throw Object.assign(new Error("Este turno ya está cerrado"), { status: 409 });
+    }
 
-  const result = await pool.query(
-    `UPDATE cierres_caja
-     SET fecha_cierre = now(), saldo_esperado = $1, saldo_real = $2, diferencia = $3, estado = 'CERRADA'
-     WHERE id = $4
-     RETURNING *`,
-    [saldoEsperado.toFixed(4), saldoReal.toFixed(4), diferencia.toFixed(4), input.cierreId]
-  );
-  return result.rows[0];
+    const saldoActualResult = await client.query(
+      `SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2`,
+      [cierre.caja_id, cierre.moneda_id]
+    );
+    const saldoEsperado =
+      saldoActualResult.rows.length > 0 ? new Decimal(saldoActualResult.rows[0].monto) : new Decimal(0);
+    const saldoReal = new Decimal(input.saldoReal);
+    const diferencia = saldoReal.minus(saldoEsperado);
+
+    const result = await client.query(
+      `UPDATE cierres_caja
+       SET fecha_cierre = now(), saldo_esperado = $1, saldo_real = $2, diferencia = $3, estado = 'CERRADA'
+       WHERE id = $4
+       RETURNING *`,
+      [saldoEsperado.toFixed(4), saldoReal.toFixed(4), diferencia.toFixed(4), input.cierreId]
+    );
+
+    await client.query("COMMIT");
+    return result.rows[0];
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function obtenerCierreAbierto(cajaId: number, monedaId: number) {

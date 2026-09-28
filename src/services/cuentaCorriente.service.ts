@@ -1,6 +1,7 @@
 import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
+import { exigirTurnoAbierto } from "./cierreCaja.service";
 
 interface RegistrarMovimientoCCInput {
   terceroId: number;
@@ -85,6 +86,8 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
       const monedaCajaId = input.monedaCajaId ?? input.monedaId;
       const tipoMovimiento = montoCaja.isPositive() ? "INGRESO" : "EGRESO";
       const montoAbsoluto = montoCaja.abs();
+
+      await exigirTurnoAbierto(client, input.cajaId, monedaCajaId);
 
       const saldoCajaResult = await client.query(
         `SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`,

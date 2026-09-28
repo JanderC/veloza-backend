@@ -806,7 +806,10 @@ CREATE TABLE public.transacciones (
     motivo_rechazo text,
     caja_destino_id integer,
     cotizacion_detalle_id integer,
-    CONSTRAINT transacciones_monto_origen_check CHECK ((monto_origen > (0)::numeric))
+    tasa_aplicada numeric(20,8),
+    operacion_calculo text,
+    CONSTRAINT transacciones_monto_origen_check CHECK ((monto_origen > (0)::numeric)),
+    CONSTRAINT transacciones_operacion_calculo_check CHECK ((operacion_calculo = ANY (ARRAY['MULTIPLICACION'::text, 'DIVISION'::text])))
 );
 
 

@@ -6,9 +6,12 @@ import {
   obtenerSolicitudesPendientes,
   confirmarTransaccion,
   rechazarTransaccion,
-  obtenerTransacciones, 
-  registrarCambioDivisa 
+  obtenerTransacciones,
+  registrarCambioDivisa,
+  calcularCambio,
+  calculoAJson,
 } from "../services/transaccionService";
+import { pool } from "../db/pool";
 
 export const transaccionesRouter = Router();
 
@@ -95,20 +98,60 @@ transaccionesRouter.post(
 );
 
 
-const registrarCambioSchema = z.object({
-  tipo: z.enum(["COMPRA_DIVISA", "VENTA_DIVISA"]),
-  terceroId: z.number().int().optional(),
-  monedaExtranjeraId: z.number().int(),
-  cantidadExtranjera: z.string(),
-  cotizacionDetalleId: z.number().int().optional(),
-  tasaManual: z.string().optional(),
-  cajaExtranjeraId: z.number().int(),
-  monedaLocalId: z.number().int(),
-  cajaLocalId: z.number().int(),
-  metodoPagoId: z.number().int().optional(),
-  referenciaCodigo: z.string().optional(),
-  bancoOrigen: z.string().optional(),
-});
+// Montos y tasas viajan como string para no perder precisión en JSON
+const decimalPositivo = z
+  .string()
+  .trim()
+  .regex(/^\d+(\.\d+)?$/, "Debe ser un número positivo con punto decimal, ej. 3.2")
+  .refine((v) => Number(v) > 0, "Debe ser mayor a cero");
+
+// El cliente trae divisa -> mandar cantidadExtranjera (se MULTIPLICA por la tasa).
+// El cliente trae pesos  -> mandar montoLocal (se DIVIDE por la tasa).
+const calculoCambioSchema = z
+  .object({
+    tipo: z.enum(["COMPRA_DIVISA", "VENTA_DIVISA"]),
+    monedaExtranjeraId: z.number().int(),
+    monedaLocalId: z.number().int(),
+    cantidadExtranjera: decimalPositivo.optional(),
+    montoLocal: decimalPositivo.optional(),
+    cotizacionDetalleId: z.number().int().optional(),
+    tasaManual: decimalPositivo.optional(),
+  })
+  .refine((d) => (d.cantidadExtranjera === undefined) !== (d.montoLocal === undefined), {
+    message: "Indicá exactamente uno: cantidadExtranjera (multiplica) o montoLocal (divide)",
+    path: ["montoLocal"],
+  })
+  .refine((d) => d.cotizacionDetalleId !== undefined || d.tasaManual !== undefined, {
+    message: "Indicá cotizacionDetalleId (tasa del día) o tasaManual",
+    path: ["tasaManual"],
+  });
+
+const registrarCambioSchema = calculoCambioSchema.and(
+  z.object({
+    terceroId: z.number().int().optional(),
+    cajaExtranjeraId: z.number().int(),
+    cajaLocalId: z.number().int(),
+    metodoPagoId: z.number().int().optional(),
+    referenciaCodigo: z.string().optional(),
+    bancoOrigen: z.string().optional(),
+  })
+);
+
+// Solo calcula (no guarda nada): para mostrarle a la cajera el resultado antes de registrar
+transaccionesRouter.post(
+  "/cambio/calcular",
+  requireAuth,
+  requireRole("ADMIN", "CAJERO", "ASESOR"),
+  async (req, res, next) => {
+    try {
+      const data = calculoCambioSchema.parse(req.body);
+      const calculo = await calcularCambio(pool, data);
+      res.json(calculoAJson(calculo));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 transaccionesRouter.post("/cambio", requireAuth, requireRole("ADMIN", "CAJERO", "ASESOR"), async (req, res, next) => {
   try {

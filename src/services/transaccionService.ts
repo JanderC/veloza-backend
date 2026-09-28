@@ -1,4 +1,4 @@
-import { PoolClient } from "pg";
+import { Pool, PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
 import { exigirTurnoAbierto } from "./cierreCaja.service";
@@ -147,16 +147,122 @@ export async function registrarTransaccion(input: RegistrarTransaccionInput) {
   }
 }
 
-// ---------- Cambio de divisa: DOS movimientos atómicos (la divisa + el pago en pesos) ----------
-interface RegistrarCambioInput {
-  tipo: "COMPRA_DIVISA" | "VENTA_DIVISA"; // COMPRA = el cliente nos vende divisa; VENTA = el cliente nos compra divisa
-  terceroId?: number;
+// ---------- Cálculo del cambio (multiplicar o dividir por la tasa) ----------
+// La tasa SIEMPRE es "pesos por 1 unidad de divisa" (ej. 3 COP por 1 Bs).
+// Lo que cambia es qué monto trae el cliente:
+//   - trae divisa  (cantidadExtranjera) -> montoLocal = cantidadExtranjera × tasa   (MULTIPLICACION)
+//   - trae pesos   (montoLocal)         -> cantidadExtranjera = montoLocal ÷ tasa   (DIVISION)
+// Ej. compra: 1000 Bs × 3 = 3000 COP. Ej. venta: 3000 COP ÷ 3.2 = 937.5 Bs.
+export interface CalcularCambioInput {
+  tipo: "COMPRA_DIVISA" | "VENTA_DIVISA";
   monedaExtranjeraId: number;
-  cantidadExtranjera: string;
-  cotizacionDetalleId?: number; // preferido: usa el valor cargado en "Tasa del Día"
-  tasaManual?: string; // alternativa si no hay cotización cargada para ese billete
+  monedaLocalId: number;
+  cantidadExtranjera?: string;
+  montoLocal?: string;
+  cotizacionDetalleId?: number;
+  tasaManual?: string;
+}
+
+export interface ResultadoCalculoCambio {
+  operacion: "MULTIPLICACION" | "DIVISION";
+  tasa: Decimal;
+  cotizacionDetalleId: number | null;
+  cantidadExtranjera: Decimal;
+  montoLocal: Decimal;
+}
+
+async function obtenerDecimalesMoneda(db: Pool | PoolClient, monedaId: number, rol: string) {
+  const result = await db.query(`SELECT decimales FROM monedas WHERE id = $1`, [monedaId]);
+  const moneda = result.rows[0];
+  if (!moneda) throw Object.assign(new Error(`Moneda ${rol} no encontrada`), { status: 404 });
+  return Number(moneda.decimales);
+}
+
+export async function calcularCambio(db: Pool | PoolClient, input: CalcularCambioInput): Promise<ResultadoCalculoCambio> {
+  if (input.monedaExtranjeraId === input.monedaLocalId) {
+    throw Object.assign(new Error("La moneda extranjera y la local deben ser distintas"), { status: 400 });
+  }
+
+  // ---- Resolver la tasa: de la cotización del día, o manual ----
+  let tasa: Decimal;
+  let cotizacionDetalleId: number | null = null;
+
+  if (input.cotizacionDetalleId) {
+    const cotResult = await db.query(`SELECT * FROM cotizaciones_detalle WHERE id = $1`, [input.cotizacionDetalleId]);
+    const cot = cotResult.rows[0];
+    if (!cot) throw Object.assign(new Error("Cotización no encontrada"), { status: 404 });
+    if (cot.valor == null) {
+      throw Object.assign(
+        new Error("Esa cotización es un porcentaje de comisión, no un precio fijo -- usá una de tipo Efectivo o ingresá la tasa manual"),
+        { status: 400 }
+      );
+    }
+    if (cot.moneda_id !== input.monedaExtranjeraId) {
+      throw Object.assign(new Error("La cotización elegida no corresponde a la moneda de la operación"), { status: 400 });
+    }
+    const tipoCotizacionEsperado = input.tipo === "COMPRA_DIVISA" ? "COMPRA" : "VENTA";
+    if (cot.tipo !== tipoCotizacionEsperado) {
+      throw Object.assign(
+        new Error(`Para esta operación se debe usar una tasa de ${tipoCotizacionEsperado}, no de ${cot.tipo}`),
+        { status: 400 }
+      );
+    }
+    tasa = new Decimal(cot.valor);
+    cotizacionDetalleId = cot.id;
+  } else if (input.tasaManual) {
+    tasa = new Decimal(input.tasaManual);
+  } else {
+    throw Object.assign(new Error("Debés indicar una cotización del día o una tasa manual"), { status: 400 });
+  }
+
+  if (!tasa.isPositive() || tasa.isZero()) {
+    throw Object.assign(new Error("La tasa debe ser mayor a cero"), { status: 400 });
+  }
+
+  const decimalesExtranjera = await obtenerDecimalesMoneda(db, input.monedaExtranjeraId, "extranjera");
+  const decimalesLocal = await obtenerDecimalesMoneda(db, input.monedaLocalId, "local");
+
+  let operacion: ResultadoCalculoCambio["operacion"];
+  let cantidadExtranjera: Decimal;
+  let montoLocal: Decimal;
+
+  if (input.cantidadExtranjera !== undefined && input.montoLocal === undefined) {
+    operacion = "MULTIPLICACION";
+    cantidadExtranjera = new Decimal(input.cantidadExtranjera).toDecimalPlaces(decimalesExtranjera, Decimal.ROUND_HALF_UP);
+    montoLocal = cantidadExtranjera.times(tasa).toDecimalPlaces(decimalesLocal, Decimal.ROUND_HALF_UP);
+  } else if (input.montoLocal !== undefined && input.cantidadExtranjera === undefined) {
+    operacion = "DIVISION";
+    montoLocal = new Decimal(input.montoLocal).toDecimalPlaces(decimalesLocal, Decimal.ROUND_HALF_UP);
+    cantidadExtranjera = montoLocal.dividedBy(tasa).toDecimalPlaces(decimalesExtranjera, Decimal.ROUND_HALF_UP);
+  } else {
+    throw Object.assign(new Error("Indicá exactamente uno: cantidadExtranjera (multiplica) o montoLocal (divide)"), {
+      status: 400,
+    });
+  }
+
+  if (!cantidadExtranjera.isPositive() || cantidadExtranjera.isZero() || !montoLocal.isPositive() || montoLocal.isZero()) {
+    throw Object.assign(new Error("El monto es demasiado pequeño para esta tasa"), { status: 400 });
+  }
+
+  return { operacion, tasa, cotizacionDetalleId, cantidadExtranjera, montoLocal };
+}
+
+/** Decimal -> string para la respuesta JSON (nunca number, para no perder precisión). */
+export function calculoAJson(calculo: ResultadoCalculoCambio) {
+  return {
+    operacion: calculo.operacion,
+    tasa: calculo.tasa.toString(),
+    cotizacionDetalleId: calculo.cotizacionDetalleId,
+    cantidadExtranjera: calculo.cantidadExtranjera.toString(),
+    montoLocal: calculo.montoLocal.toString(),
+  };
+}
+
+// ---------- Cambio de divisa: DOS movimientos atómicos (la divisa + el pago en pesos) ----------
+interface RegistrarCambioInput extends CalcularCambioInput {
+  // COMPRA = el cliente nos vende divisa; VENTA = el cliente nos compra divisa
+  terceroId?: number;
   cajaExtranjeraId: number; // dónde entra/sale la divisa física
-  monedaLocalId: number; // normalmente COP
   cajaLocalId: number; // caja física, o un banco (Nequi/Bancolombia) si se paga por transferencia
   metodoPagoId?: number;
   referenciaCodigo?: string;
@@ -166,34 +272,12 @@ interface RegistrarCambioInput {
 
 export async function registrarCambioDivisa(input: RegistrarCambioInput) {
   const client: PoolClient = await pool.connect();
-  const cantidadExtranjera = new Decimal(input.cantidadExtranjera);
 
   try {
     await client.query("BEGIN");
 
-    // ---- Resolver la tasa: de la cotización del día, o manual ----
-    let tasa: Decimal;
-    let cotizacionDetalleId: number | null = null;
-
-    if (input.cotizacionDetalleId) {
-      const cotResult = await client.query(`SELECT * FROM cotizaciones_detalle WHERE id = $1`, [input.cotizacionDetalleId]);
-      const cot = cotResult.rows[0];
-      if (!cot) throw Object.assign(new Error("Cotización no encontrada"), { status: 404 });
-      if (cot.valor == null) {
-        throw Object.assign(
-          new Error("Esa cotización es un porcentaje de comisión, no un precio fijo -- usá una de tipo Efectivo o ingresá la tasa manual"),
-          { status: 400 }
-        );
-      }
-      tasa = new Decimal(cot.valor);
-      cotizacionDetalleId = cot.id;
-    } else if (input.tasaManual) {
-      tasa = new Decimal(input.tasaManual);
-    } else {
-      throw Object.assign(new Error("Debés indicar una cotización del día o una tasa manual"), { status: 400 });
-    }
-
-    const montoLocal = cantidadExtranjera.times(tasa);
+    const calculo = await calcularCambio(client, input);
+    const { cantidadExtranjera, montoLocal, tasa, cotizacionDetalleId } = calculo;
 
     // ---- Cajas involucradas ----
     const cajaExtResult = await client.query(`SELECT * FROM cajas WHERE id = $1`, [input.cajaExtranjeraId]);
@@ -222,8 +306,9 @@ export async function registrarCambioDivisa(input: RegistrarCambioInput) {
     const txResult = await client.query(
       `INSERT INTO transacciones
         (tipo, estado, tercero_id, caja_id, caja_destino_id, moneda_origen_id, monto_origen,
-         moneda_destino_id, monto_destino, cotizacion_detalle_id, metodo_pago_id, referencia_id, usuario_id, confirmada_en)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, CASE WHEN $2 = 'CONFIRMADA' THEN now() ELSE NULL END)
+         moneda_destino_id, monto_destino, cotizacion_detalle_id, metodo_pago_id, referencia_id, usuario_id,
+         tasa_aplicada, operacion_calculo, confirmada_en)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, CASE WHEN $2 = 'CONFIRMADA' THEN now() ELSE NULL END)
        RETURNING *`,
       [
         input.tipo,
@@ -239,13 +324,15 @@ export async function registrarCambioDivisa(input: RegistrarCambioInput) {
         input.metodoPagoId ?? null,
         referenciaId,
         input.usuarioId,
+        tasa.toFixed(8),
+        calculo.operacion,
       ]
     );
     const transaccion = txResult.rows[0];
 
     if (requiereConfirmacion) {
       await client.query("COMMIT");
-      return { transaccion, montoLocal: montoLocal.toFixed(4), requiereConfirmacion: true };
+      return { transaccion, calculo: calculoAJson(calculo), montoLocal: montoLocal.toFixed(4), requiereConfirmacion: true };
     }
 
     // COMPRA_DIVISA: el cliente nos entrega divisa (INGRESO) y le pagamos pesos (EGRESO).
@@ -273,7 +360,7 @@ export async function registrarCambioDivisa(input: RegistrarCambioInput) {
     });
 
     await client.query("COMMIT");
-    return { transaccion, montoLocal: montoLocal.toFixed(4), requiereConfirmacion: false };
+    return { transaccion, calculo: calculoAJson(calculo), montoLocal: montoLocal.toFixed(4), requiereConfirmacion: false };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;

@@ -4,7 +4,7 @@ import { pool } from "../db/pool";
 import { exigirTurnoAbierto } from "./cierreCaja.service";
 
 // ---------- Helper compartido: UN movimiento de caja ----------
-async function aplicarMovimientoLeg(
+export async function aplicarMovimientoLeg(
   client: PoolClient,
   params: {
     cajaId: number;

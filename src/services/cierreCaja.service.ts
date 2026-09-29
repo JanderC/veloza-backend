@@ -18,6 +18,20 @@ export async function exigirTurnoAbierto(client: PoolClient, cajaId: number, mon
   }
 }
 
+/**
+ * Igual que abrirCaja pero dentro de una transacción ya abierta, y sin error
+ * si el turno ya existe. Lo usan fondeo y transferencias para abrir el turno
+ * del destino en el mismo paso. saldo_inicial = saldo ANTES del movimiento.
+ */
+export async function abrirTurnoSiFalta(client: PoolClient, cajaId: number, monedaId: number, usuarioId: number) {
+  await client.query(
+    `INSERT INTO cierres_caja (caja_id, moneda_id, usuario_id, fecha_apertura, saldo_inicial, estado)
+     VALUES ($1, $2, $3, now(), COALESCE((SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2), 0), 'ABIERTA')
+     ON CONFLICT (caja_id, moneda_id) WHERE estado = 'ABIERTA' DO NOTHING`,
+    [cajaId, monedaId, usuarioId]
+  );
+}
+
 interface AbrirCajaInput {
   cajaId: number;
   monedaId: number;

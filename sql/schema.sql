@@ -156,7 +156,8 @@ CREATE TYPE public.tipo_transaccion AS ENUM (
     'RETIRO',
     'TRANSFERENCIA_INTERNA',
     'ABONO_CXC',
-    'ABONO_CXP'
+    'ABONO_CXP',
+    'FONDEO'
 );
 
 
@@ -221,7 +222,10 @@ CREATE TABLE public.cajas (
     id integer NOT NULL,
     nombre text NOT NULL,
     tipo public.tipo_caja DEFAULT 'FISICA'::public.tipo_caja NOT NULL,
-    activo boolean DEFAULT true NOT NULL
+    activo boolean DEFAULT true NOT NULL,
+    es_principal boolean DEFAULT false NOT NULL,
+    descripcion text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -808,6 +812,7 @@ CREATE TABLE public.transacciones (
     cotizacion_detalle_id integer,
     tasa_aplicada numeric(20,8),
     operacion_calculo text,
+    observacion text,
     CONSTRAINT transacciones_monto_origen_check CHECK ((monto_origen > (0)::numeric)),
     CONSTRAINT transacciones_operacion_calculo_check CHECK ((operacion_calculo = ANY (ARRAY['MULTIPLICACION'::text, 'DIVISION'::text])))
 );
@@ -1401,6 +1406,13 @@ CREATE INDEX idx_transacciones_estado ON public.transacciones USING btree (estad
 --
 
 CREATE INDEX idx_transacciones_fecha ON public.transacciones USING btree (created_at);
+
+
+--
+-- Name: idx_una_caja_principal; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_una_caja_principal ON public.cajas USING btree (es_principal) WHERE es_principal;
 
 
 --

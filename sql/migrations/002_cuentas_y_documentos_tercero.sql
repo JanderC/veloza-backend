@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS cuentas_tercero (
 );
 CREATE INDEX IF NOT EXISTS idx_cuentas_tercero_tercero ON cuentas_tercero (tercero_id);
 
--- Documentos del cliente (cédula, RIF, soportes). El archivo vive en R2;
+-- Documentos del cliente (cédula, RIF, soportes). El archivo vive en Cloudinary (privado);
 -- aquí solo la ruta (archivo_key). Nunca se borran: se aprueban o rechazan.
 CREATE TABLE IF NOT EXISTS documentos_tercero (
   id SERIAL PRIMARY KEY,

@@ -16,6 +16,12 @@ const DOCUMENTOS_IDENTIDAD: TipoDocumento[] = ["CEDULA", "PASAPORTE", "RIF"];
 
 const SEGUNDOS_URL_TEMPORAL = 300;
 
+// Columnas que se devuelven al front. fecha_vencimiento como texto AAAA-MM-DD:
+// si pg la convierte a Date, la zona horaria la corre al día anterior en el front.
+const COLUMNAS_DOCUMENTO = `id, tercero_id, transaccion_id, tipo, descripcion, nombre_original, mime_type, tamano_bytes,
+  to_char(fecha_vencimiento, 'YYYY-MM-DD') AS fecha_vencimiento, estado, motivo_rechazo, revisado_por_id,
+  revisado_en, subido_por_id, created_at`;
+
 interface SubirDocumentoInput {
   terceroId: number;
   tipo: TipoDocumento;
@@ -45,8 +51,12 @@ export async function subirDocumento(input: SubirDocumentoInput) {
   }
 
   // Primero el archivo, después la fila. Si el INSERT falla se intenta borrar el archivo huérfano.
-  const archivoKey = `terceros/${input.terceroId}/${randomUUID()}.${extension}`;
-  await subirArchivo(archivoKey, input.archivo.buffer, input.archivo.mimetype);
+  const archivoKey = await subirArchivo(
+    `terceros/${input.terceroId}`,
+    randomUUID(),
+    input.archivo.buffer,
+    input.archivo.mimetype
+  );
 
   try {
     const result = await pool.query(
@@ -54,7 +64,7 @@ export async function subirDocumento(input: SubirDocumentoInput) {
         (tercero_id, transaccion_id, tipo, descripcion, archivo_key, nombre_original, mime_type, tamano_bytes,
          fecha_vencimiento, subido_por_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       RETURNING *`,
+       RETURNING ${COLUMNAS_DOCUMENTO}`,
       [
         input.terceroId,
         input.transaccionId ?? null,
@@ -70,7 +80,7 @@ export async function subirDocumento(input: SubirDocumentoInput) {
     );
     return result.rows[0];
   } catch (err) {
-    await eliminarArchivo(archivoKey).catch((e) => console.error("No se pudo borrar archivo huérfano", archivoKey, e));
+    await eliminarArchivo(archivoKey, input.archivo.mimetype).catch((e) => console.error("No se pudo borrar archivo huérfano", archivoKey, e));
     throw err;
   }
 }
@@ -78,7 +88,7 @@ export async function subirDocumento(input: SubirDocumentoInput) {
 export async function listarDocumentosTercero(terceroId: number) {
   const result = await pool.query(
     `SELECT d.id, d.tercero_id, d.transaccion_id, d.tipo, d.descripcion, d.nombre_original, d.mime_type,
-            d.tamano_bytes, d.fecha_vencimiento, d.estado, d.motivo_rechazo, d.revisado_en, d.created_at,
+            d.tamano_bytes, to_char(d.fecha_vencimiento, 'YYYY-MM-DD') AS fecha_vencimiento, d.estado, d.motivo_rechazo, d.revisado_en, d.created_at,
             (d.fecha_vencimiento IS NOT NULL AND d.fecha_vencimiento < current_date) AS vencido,
             us.nombre AS subido_por_nombre, ur.nombre AS revisado_por_nombre
      FROM documentos_tercero d
@@ -98,7 +108,7 @@ export async function obtenerUrlDocumento(documentoId: number) {
   const doc = result.rows[0];
   if (!doc) throw Object.assign(new Error("Documento no encontrado"), { status: 404 });
 
-  const url = await generarUrlTemporal(doc.archivo_key, doc.nombre_original, SEGUNDOS_URL_TEMPORAL);
+  const url = generarUrlTemporal(doc.archivo_key, doc.mime_type, SEGUNDOS_URL_TEMPORAL);
   return { url, mimeType: doc.mime_type, expiraEnSegundos: SEGUNDOS_URL_TEMPORAL };
 }
 
@@ -130,7 +140,7 @@ export async function revisarDocumento(input: RevisarDocumentoInput) {
       `UPDATE documentos_tercero
        SET estado = $1, motivo_rechazo = $2, revisado_por_id = $3, revisado_en = now()
        WHERE id = $4
-       RETURNING *`,
+       RETURNING ${COLUMNAS_DOCUMENTO}`,
       [input.estado, input.estado === "RECHAZADO" ? input.motivo : null, input.usuarioId, input.documentoId]
     );
     await client.query("COMMIT");

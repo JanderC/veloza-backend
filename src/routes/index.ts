@@ -13,12 +13,16 @@ import { reportesRouter } from "./reportes.routes";
 import { metodosPagoRouter } from "./metodosPago.routes";
 import { usuariosRouter } from "./usuarios.routes";
 import { whatsappRouter } from "./whatsapp.routes";
+import { cuentasTerceroRouter } from "./cuentasTercero.routes";
+import { documentosTerceroRouter } from "./documentosTercero.routes";
 
 export const router = Router();
 
 router.use("/auth", authRouter);
 router.use("/transacciones", transaccionesRouter);
 router.use("/terceros", tercerosRouter);
+router.use("/terceros", cuentasTerceroRouter);
+router.use("/terceros", documentosTerceroRouter);
 router.use("/monedas", monedasRouter);
 router.use("/tasas", tasasRouter);
 router.use("/cuentas-por-cobrar", cuentasPorCobrarRouter);

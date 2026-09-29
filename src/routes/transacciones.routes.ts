@@ -129,6 +129,7 @@ const calculoCambioSchema = z
 const registrarCambioSchema = calculoCambioSchema.and(
   z.object({
     terceroId: z.number().int().optional(),
+    cuentaTerceroId: z.number().int().optional(), // cuenta del cliente a donde se le paga
     cajaExtranjeraId: z.number().int(),
     cajaLocalId: z.number().int(),
     metodoPagoId: z.number().int().optional(),

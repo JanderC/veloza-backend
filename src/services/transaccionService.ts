@@ -262,6 +262,7 @@ export function calculoAJson(calculo: ResultadoCalculoCambio) {
 interface RegistrarCambioInput extends CalcularCambioInput {
   // COMPRA = el cliente nos vende divisa; VENTA = el cliente nos compra divisa
   terceroId?: number;
+  cuentaTerceroId?: number; // cuenta del cliente a donde se le paga (debe ser suya y estar activa)
   cajaExtranjeraId: number; // dónde entra/sale la divisa física
   cajaLocalId: number; // caja física, o un banco (Nequi/Bancolombia) si se paga por transferencia
   metodoPagoId?: number;
@@ -278,6 +279,21 @@ export async function registrarCambioDivisa(input: RegistrarCambioInput) {
 
     const calculo = await calcularCambio(client, input);
     const { cantidadExtranjera, montoLocal, tasa, cotizacionDetalleId } = calculo;
+
+    if (input.cuentaTerceroId !== undefined) {
+      if (input.terceroId === undefined) {
+        throw Object.assign(new Error("Para indicar la cuenta del cliente hay que indicar también el cliente"), { status: 400 });
+      }
+      const cuentaResult = await client.query(`SELECT tercero_id, activo FROM cuentas_tercero WHERE id = $1`, [
+        input.cuentaTerceroId,
+      ]);
+      const cuenta = cuentaResult.rows[0];
+      if (!cuenta) throw Object.assign(new Error("Cuenta del cliente no encontrada"), { status: 404 });
+      if (cuenta.tercero_id !== input.terceroId) {
+        throw Object.assign(new Error("Esa cuenta no pertenece a este cliente"), { status: 400 });
+      }
+      if (!cuenta.activo) throw Object.assign(new Error("Esa cuenta del cliente está desactivada"), { status: 409 });
+    }
 
     // ---- Cajas involucradas ----
     const cajaExtResult = await client.query(`SELECT * FROM cajas WHERE id = $1`, [input.cajaExtranjeraId]);
@@ -307,8 +323,8 @@ export async function registrarCambioDivisa(input: RegistrarCambioInput) {
       `INSERT INTO transacciones
         (tipo, estado, tercero_id, caja_id, caja_destino_id, moneda_origen_id, monto_origen,
          moneda_destino_id, monto_destino, cotizacion_detalle_id, metodo_pago_id, referencia_id, usuario_id,
-         tasa_aplicada, operacion_calculo, confirmada_en)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, CASE WHEN $2 = 'CONFIRMADA' THEN now() ELSE NULL END)
+         tasa_aplicada, operacion_calculo, cuenta_tercero_id, confirmada_en)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, CASE WHEN $2 = 'CONFIRMADA' THEN now() ELSE NULL END)
        RETURNING *`,
       [
         input.tipo,
@@ -326,6 +342,7 @@ export async function registrarCambioDivisa(input: RegistrarCambioInput) {
         input.usuarioId,
         tasa.toFixed(8),
         calculo.operacion,
+        input.cuentaTerceroId ?? null,
       ]
     );
     const transaccion = txResult.rows[0];

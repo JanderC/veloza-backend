@@ -9,6 +9,7 @@ import {
   listarCajas,
   listarMovimientosInternos,
   marcarPrincipal,
+  obtenerEstadoCaja,
   transferirEntreCajas,
 } from "../services/cajas.service";
 
@@ -124,6 +125,27 @@ cajasRouter.post("/transferencias", requireAuth, requireRole("ADMIN", "CAJERO"),
   try {
     const data = transferenciaSchema.parse(req.body);
     res.status(201).json(await transferirEntreCajas({ ...data, usuarioId: req.user!.id }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+const fechaDia = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha inválida (AAAA-MM-DD)");
+const estadoCajaSchema = z.object({
+  monedaId: z.coerce.number().int().optional(),
+  desde: fechaDia.optional(),
+  hasta: fechaDia.optional(),
+  tipo: z.enum(["INGRESO", "EGRESO"]).optional(),
+  limite: z.coerce.number().int().min(1).max(2000).default(300),
+});
+
+// Una caja por separado: saldos por moneda, cuadre del período y sus movimientos
+cajasRouter.get("/:id/estado", requireAuth, requireRole("ADMIN", "CAJERO"), async (req, res, next) => {
+  try {
+    const id = leerId(req.params.id);
+    if (id === null) return res.status(400).json({ error: "id inválido" });
+    const filtros = estadoCajaSchema.parse(req.query);
+    res.json(await obtenerEstadoCaja(id, filtros));
   } catch (err) {
     next(err);
   }

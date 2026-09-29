@@ -423,3 +423,149 @@ export async function listarMovimientosInternos(filtros: { cajaId?: number; limi
   );
   return result.rows;
 }
+
+// ---------- Estado de cuenta de UNA caja: saldos, movimientos y cuadre por moneda ----------
+
+interface FiltrosEstadoCaja {
+  monedaId?: number;
+  desde?: string; // "AAAA-MM-DD", día de Colombia
+  hasta?: string; // "AAAA-MM-DD", inclusive
+  tipo?: "INGRESO" | "EGRESO";
+  limite: number;
+}
+
+// Las fechas del filtro son días calendario de Colombia, no UTC
+const DIA_BOGOTA = `(mc.created_at AT TIME ZONE 'America/Bogota')::date`;
+
+export async function obtenerEstadoCaja(cajaId: number, filtros: FiltrosEstadoCaja) {
+  const cajaResult = await pool.query(
+    `SELECT c.*, (SELECT codigo FROM monedas WHERE id = c.moneda_id) AS moneda_codigo FROM cajas c WHERE c.id = $1`,
+    [cajaId]
+  );
+  const caja = cajaResult.rows[0];
+  if (!caja) throw errorHttp("Caja no encontrada", 404);
+
+  // Monedas que la caja tiene o tuvo (saldo o algún movimiento), con saldo actual y turno
+  const monedasResult = await pool.query(
+    `SELECT m.id AS moneda_id, m.codigo AS moneda_codigo, m.decimales,
+            COALESCE(s.monto, 0) AS saldo_actual,
+            cc.id AS cierre_abierto_id, cc.fecha_apertura AS turno_abierto_desde
+     FROM monedas m
+     LEFT JOIN saldos_caja s ON s.caja_id = $1 AND s.moneda_id = m.id
+     LEFT JOIN cierres_caja cc ON cc.caja_id = $1 AND cc.moneda_id = m.id AND cc.estado = 'ABIERTA'
+     WHERE s.id IS NOT NULL OR EXISTS (SELECT 1 FROM movimientos_caja mc WHERE mc.caja_id = $1 AND mc.moneda_id = m.id)
+     ORDER BY m.codigo`,
+    [cajaId]
+  );
+
+  // Condiciones del período (sirven para el resumen y para la lista)
+  const condPeriodo: string[] = [];
+  const valoresPeriodo: unknown[] = [cajaId];
+  if (filtros.desde) {
+    valoresPeriodo.push(filtros.desde);
+    condPeriodo.push(`${DIA_BOGOTA} >= $${valoresPeriodo.length}::date`);
+  }
+  if (filtros.hasta) {
+    valoresPeriodo.push(filtros.hasta);
+    condPeriodo.push(`${DIA_BOGOTA} <= $${valoresPeriodo.length}::date`);
+  }
+  const wherePeriodo = condPeriodo.length > 0 ? `AND ${condPeriodo.join(" AND ")}` : "";
+
+  // ---- Resumen por moneda: saldo al inicio del período, ingresos, egresos y saldo final ----
+  const resumenResult = await pool.query(
+    `SELECT mc.moneda_id,
+            count(*)::int AS movimientos,
+            COALESCE(SUM(mc.monto) FILTER (WHERE mc.tipo = 'INGRESO'), 0) AS ingresos,
+            COALESCE(SUM(mc.monto) FILTER (WHERE mc.tipo = 'EGRESO'), 0) AS egresos,
+            (array_agg(mc.saldo_anterior ORDER BY mc.id ASC))[1] AS saldo_inicial,
+            (array_agg(mc.saldo_nuevo ORDER BY mc.id DESC))[1] AS saldo_final
+     FROM movimientos_caja mc
+     WHERE mc.caja_id = $1 ${wherePeriodo}
+     GROUP BY mc.moneda_id`,
+    valoresPeriodo
+  );
+  const resumenPorMoneda = new Map(resumenResult.rows.map((r) => [r.moneda_id as number, r]));
+
+  // Sin movimientos en el período: el saldo es el último conocido hasta que termina
+  const saldoHastaFinDelPeriodo = async (monedaId: number) => {
+    const vals: unknown[] = [cajaId, monedaId];
+    let cond = "";
+    if (filtros.hasta) {
+      vals.push(filtros.hasta);
+      cond = `AND ${DIA_BOGOTA} <= $${vals.length}::date`;
+    }
+    const r = await pool.query(
+      `SELECT saldo_nuevo FROM movimientos_caja mc WHERE mc.caja_id = $1 AND mc.moneda_id = $2 ${cond} ORDER BY mc.id DESC LIMIT 1`,
+      vals
+    );
+    return (r.rows[0]?.saldo_nuevo as string | undefined) ?? "0";
+  };
+
+  const monedas = [];
+  for (const m of monedasResult.rows) {
+    const r = resumenPorMoneda.get(m.moneda_id);
+    const saldoInicial: string = r ? r.saldo_inicial : await saldoHastaFinDelPeriodo(m.moneda_id);
+    const saldoFinal: string = r ? r.saldo_final : saldoInicial;
+    const ingresos: string = r?.ingresos ?? "0";
+    const egresos: string = r?.egresos ?? "0";
+    monedas.push({
+      monedaId: m.moneda_id,
+      monedaCodigo: m.moneda_codigo,
+      decimales: Number(m.decimales),
+      saldoActual: new Decimal(m.saldo_actual).toFixed(4),
+      turnoAbierto: m.cierre_abierto_id != null,
+      turnoAbiertoDesde: m.turno_abierto_desde,
+      periodo: {
+        movimientos: r?.movimientos ?? 0,
+        saldoInicial: new Decimal(saldoInicial).toFixed(4),
+        ingresos: new Decimal(ingresos).toFixed(4),
+        egresos: new Decimal(egresos).toFixed(4),
+        saldoFinal: new Decimal(saldoFinal).toFixed(4),
+        // inicial + ingresos - egresos tiene que dar el final: si no, hay un descuadre
+        cuadra: new Decimal(saldoInicial).plus(ingresos).minus(egresos).eq(saldoFinal),
+      },
+    });
+  }
+
+  // ---- Movimientos con su concepto ----
+  const valoresLista = [...valoresPeriodo];
+  let filtrosLista = wherePeriodo;
+  if (filtros.monedaId) {
+    valoresLista.push(filtros.monedaId);
+    filtrosLista += ` AND mc.moneda_id = $${valoresLista.length}`;
+  }
+  if (filtros.tipo) {
+    valoresLista.push(filtros.tipo);
+    filtrosLista += ` AND mc.tipo = $${valoresLista.length}`;
+  }
+  valoresLista.push(filtros.limite + 1);
+
+  const movsResult = await pool.query(
+    `SELECT mc.id, mc.tipo, mc.monto, mc.saldo_anterior, mc.saldo_nuevo, mc.created_at, mc.moneda_id,
+            m.codigo AS moneda_codigo, u.nombre AS usuario_nombre, mp.nombre AS metodo_pago_nombre,
+            t.id AS transaccion_id, t.tipo AS transaccion_tipo, t.observacion,
+            ter.nombre AS tercero_nombre, r.codigo AS referencia_codigo,
+            -- la otra caja de la operación (transferencia o cambio)
+            CASE WHEN t.caja_id = mc.caja_id THEN cd.nombre ELSE co.nombre END AS contraparte_nombre
+     FROM movimientos_caja mc
+     JOIN monedas m ON m.id = mc.moneda_id
+     JOIN usuarios u ON u.id = mc.usuario_id
+     LEFT JOIN metodos_pago mp ON mp.id = mc.metodo_pago_id
+     LEFT JOIN transacciones t ON t.id = mc.transaccion_id
+     LEFT JOIN terceros ter ON ter.id = t.tercero_id
+     LEFT JOIN referencias r ON r.id = t.referencia_id
+     LEFT JOIN cajas co ON co.id = t.caja_id
+     LEFT JOIN cajas cd ON cd.id = t.caja_destino_id
+     WHERE mc.caja_id = $1 ${filtrosLista}
+     ORDER BY mc.id DESC
+     LIMIT $${valoresLista.length}`,
+    valoresLista
+  );
+
+  return {
+    caja,
+    monedas,
+    movimientos: movsResult.rows.slice(0, filtros.limite),
+    hayMas: movsResult.rows.length > filtros.limite,
+  };
+}

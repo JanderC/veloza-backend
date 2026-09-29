@@ -12,6 +12,7 @@ import {
   calculoAJson,
 } from "../services/transaccionService";
 import { pool } from "../db/pool";
+import { obtenerDetalleSolicitud } from "../services/solicitudes.service";
 
 export const transaccionesRouter = Router();
 
@@ -58,6 +59,25 @@ transaccionesRouter.get("/solicitudes", requireAuth, async (req, res, next) => {
   }
 });
 
+// Detalle completo para revisar una solicitud antes de confirmarla o rechazarla
+transaccionesRouter.get("/:id/detalle", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
+  try {
+    const id = req.params.id ? Number(req.params.id) : NaN;
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    res.json(await obtenerDetalleSolicitud(id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+const confirmarSchema = z
+  .object({
+    montoVerificado: z.string().trim().min(1).optional(),
+    checklist: z.array(z.string().max(120)).max(20).optional(),
+    nota: z.string().max(500).optional(),
+  })
+  .optional();
+
 transaccionesRouter.post(
   "/:id/confirmar",
   requireAuth,
@@ -68,7 +88,8 @@ transaccionesRouter.post(
       const id = idParam ? Number(idParam) : NaN;
       if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
 
-      const resultado = await confirmarTransaccion(id, req.user!.id);
+      const verificacion = confirmarSchema.parse(req.body ?? undefined);
+      const resultado = await confirmarTransaccion(id, req.user!.id, verificacion);
       res.json(resultado);
     } catch (err) {
       next(err);

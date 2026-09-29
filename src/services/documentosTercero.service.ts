@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { pool } from "../db/pool";
 import { subirArchivo, eliminarArchivo, generarUrlTemporal } from "./almacenamiento.service";
 
-export type TipoDocumento = "CEDULA" | "RIF" | "PASAPORTE" | "COMPROBANTE_DOMICILIO" | "ORIGEN_FONDOS" | "OTRO";
+export type TipoDocumento = "CEDULA" | "RIF" | "PASAPORTE" | "COMPROBANTE_DOMICILIO" | "ORIGEN_FONDOS" | "COMPROBANTE_PAGO" | "OTRO";
 
 export const MIME_PERMITIDOS: Record<string, string> = {
   "image/jpeg": "jpg",
@@ -174,7 +174,7 @@ export interface ResumenVerificacion {
 export async function obtenerVerificacionTercero(terceroId: number): Promise<ResumenVerificacion> {
   const result = await pool.query(
     `SELECT tipo, estado, (fecha_vencimiento IS NOT NULL AND fecha_vencimiento < current_date) AS vencido
-     FROM documentos_tercero WHERE tercero_id = $1`,
+     FROM documentos_tercero WHERE tercero_id = $1 AND tipo <> 'COMPROBANTE_PAGO'`,
     [terceroId]
   );
   const docs: { tipo: TipoDocumento; estado: string; vencido: boolean }[] = result.rows;

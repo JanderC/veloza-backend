@@ -2,6 +2,7 @@ import { Pool, PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
 import { exigirTurnoAbierto } from "./cierreCaja.service";
+import { patasDeTransaccion, validarMontoVerificado, type VerificacionConfirmacion } from "./solicitudes.service";
 
 // ---------- Helper compartido: UN movimiento de caja ----------
 export async function aplicarMovimientoLeg(
@@ -408,7 +409,10 @@ export async function obtenerSolicitudesPendientes(filtros: FiltrosSolicitudes) 
   const result = await pool.query(
     `SELECT t.*, c.nombre AS caja_nombre, cd.nombre AS caja_destino_nombre,
             m.codigo AS moneda_codigo, md.codigo AS moneda_destino_codigo,
-            ter.nombre AS tercero_nombre, u.nombre AS creado_por_nombre, r.codigo AS referencia_codigo
+            ter.nombre AS tercero_nombre, u.nombre AS creado_por_nombre, r.codigo AS referencia_codigo,
+            c.tipo AS caja_tipo, cd.tipo AS caja_destino_tipo, ter.identificacion AS tercero_identificacion,
+            mp.nombre AS metodo_pago_nombre, r.banco_origen AS referencia_banco_origen,
+            (SELECT count(*)::int FROM documentos_tercero d WHERE d.transaccion_id = t.id) AS documentos
      FROM transacciones t
      JOIN cajas c ON c.id = t.caja_id
      LEFT JOIN cajas cd ON cd.id = t.caja_destino_id
@@ -417,6 +421,7 @@ export async function obtenerSolicitudesPendientes(filtros: FiltrosSolicitudes) 
      LEFT JOIN terceros ter ON ter.id = t.tercero_id
      JOIN usuarios u ON u.id = t.usuario_id
      LEFT JOIN referencias r ON r.id = t.referencia_id
+     LEFT JOIN metodos_pago mp ON mp.id = t.metodo_pago_id
      WHERE ${condiciones.join(" AND ")}
      ORDER BY t.created_at ASC`,
     valores
@@ -424,8 +429,11 @@ export async function obtenerSolicitudesPendientes(filtros: FiltrosSolicitudes) 
   return result.rows;
 }
 
-/** Confirma una solicitud pendiente -- aplica UNA o DOS patas según corresponda. Quien la creó no puede confirmarla. */
-export async function confirmarTransaccion(transaccionId: number, usuarioConfirmaId: number) {
+/**
+ * Confirma una solicitud pendiente -- aplica UNA o DOS patas según corresponda. Quien la creó no puede confirmarla.
+ * `verificacion` (opcional) queda guardada como auditoría; si trae montoVerificado, tiene que coincidir.
+ */
+export async function confirmarTransaccion(transaccionId: number, usuarioConfirmaId: number, verificacion?: VerificacionConfirmacion) {
   const client: PoolClient = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -436,6 +444,12 @@ export async function confirmarTransaccion(transaccionId: number, usuarioConfirm
     if (transaccion.estado !== "PENDIENTE") throw Object.assign(new Error("Esta solicitud ya fue resuelta"), { status: 409 });
     if (transaccion.usuario_id === usuarioConfirmaId) {
       throw Object.assign(new Error("Quien registró la solicitud no puede confirmarla"), { status: 403 });
+    }
+
+    if (verificacion?.montoVerificado !== undefined) {
+      const patas = patasDeTransaccion(transaccion);
+      const tipos = await client.query(`SELECT id, tipo FROM cajas WHERE id = ANY($1::int[])`, [patas.map((p) => p.cajaId)]);
+      validarMontoVerificado(patas, new Map(tipos.rows.map((r) => [r.id, r.tipo])), verificacion.montoVerificado);
     }
 
     const esCambio = transaccion.caja_destino_id != null;
@@ -475,8 +489,8 @@ export async function confirmarTransaccion(transaccionId: number, usuarioConfirm
     }
 
     const updateResult = await client.query(
-      `UPDATE transacciones SET estado = 'CONFIRMADA', confirmada_en = now(), confirmado_por_id = $1 WHERE id = $2 RETURNING *`,
-      [usuarioConfirmaId, transaccionId]
+      `UPDATE transacciones SET estado = 'CONFIRMADA', confirmada_en = now(), confirmado_por_id = $1, verificacion = $3 WHERE id = $2 RETURNING *`,
+      [usuarioConfirmaId, transaccionId, verificacion ? JSON.stringify({ ...verificacion, verificadoEn: new Date().toISOString() }) : null]
     );
 
     if (transaccion.referencia_id) {

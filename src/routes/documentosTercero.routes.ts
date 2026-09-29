@@ -27,7 +27,7 @@ const upload = multer({
 
 // multipart/form-data: todos los campos llegan como texto
 const subirDocumentoSchema = z.object({
-  tipo: z.enum(["CEDULA", "RIF", "PASAPORTE", "COMPROBANTE_DOMICILIO", "ORIGEN_FONDOS", "OTRO"]),
+  tipo: z.enum(["CEDULA", "RIF", "PASAPORTE", "COMPROBANTE_DOMICILIO", "ORIGEN_FONDOS", "COMPROBANTE_PAGO", "OTRO"]),
   descripcion: z.string().trim().min(1).optional(),
   fechaVencimiento: z
     .string()

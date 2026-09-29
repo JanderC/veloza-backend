@@ -825,6 +825,7 @@ CREATE TABLE public.transacciones (
     tasa_aplicada numeric(20,8),
     operacion_calculo text,
     observacion text,
+    verificacion jsonb,
     CONSTRAINT transacciones_monto_origen_check CHECK ((monto_origen > (0)::numeric)),
     CONSTRAINT transacciones_operacion_calculo_check CHECK ((operacion_calculo = ANY (ARRAY['MULTIPLICACION'::text, 'DIVISION'::text])))
 );
@@ -1852,7 +1853,7 @@ CREATE TABLE IF NOT EXISTS documentos_tercero (
   id SERIAL PRIMARY KEY,
   tercero_id integer NOT NULL REFERENCES terceros(id),
   transaccion_id integer REFERENCES transacciones(id),
-  tipo text NOT NULL CHECK (tipo IN ('CEDULA', 'RIF', 'PASAPORTE', 'COMPROBANTE_DOMICILIO', 'ORIGEN_FONDOS', 'OTRO')),
+  tipo text NOT NULL CONSTRAINT documentos_tercero_tipo_check CHECK (tipo IN ('CEDULA', 'RIF', 'PASAPORTE', 'COMPROBANTE_DOMICILIO', 'ORIGEN_FONDOS', 'COMPROBANTE_PAGO', 'OTRO')),
   descripcion text,
   archivo_key text NOT NULL UNIQUE,
   nombre_original text NOT NULL,
@@ -1867,6 +1868,7 @@ CREATE TABLE IF NOT EXISTS documentos_tercero (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_documentos_tercero_tercero ON documentos_tercero (tercero_id);
+CREATE INDEX IF NOT EXISTS idx_documentos_tercero_transaccion ON documentos_tercero (transaccion_id);
 
 -- A qué cuenta del cliente se le pagó en un cambio
 ALTER TABLE transacciones ADD COLUMN IF NOT EXISTS cuenta_tercero_id integer REFERENCES cuentas_tercero(id);

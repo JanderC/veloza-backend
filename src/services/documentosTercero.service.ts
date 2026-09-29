@@ -90,7 +90,7 @@ export async function listarDocumentosTercero(terceroId: number) {
     `SELECT d.id, d.tercero_id, d.transaccion_id, d.tipo, d.descripcion, d.nombre_original, d.mime_type,
             d.tamano_bytes, to_char(d.fecha_vencimiento, 'YYYY-MM-DD') AS fecha_vencimiento, d.estado, d.motivo_rechazo, d.revisado_en, d.created_at,
             (d.fecha_vencimiento IS NOT NULL AND d.fecha_vencimiento < current_date) AS vencido,
-            us.nombre AS subido_por_nombre, ur.nombre AS revisado_por_nombre
+            d.subido_por_id, us.nombre AS subido_por_nombre, d.revisado_por_id, ur.nombre AS revisado_por_nombre
      FROM documentos_tercero d
      JOIN usuarios us ON us.id = d.subido_por_id
      LEFT JOIN usuarios ur ON ur.id = d.revisado_por_id

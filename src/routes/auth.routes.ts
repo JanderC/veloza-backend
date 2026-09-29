@@ -17,7 +17,7 @@ authRouter.post("/login", async (req, res, next) => {
     const { email, password } = loginSchema.parse(req.body);
 
     const result = await pool.query(
-      `SELECT id, password_hash, rol, activo FROM usuarios WHERE email = $1`,
+      `SELECT id, nombre, email, password_hash, rol, activo FROM usuarios WHERE email = $1`,
       [email]
     );
     const usuario = result.rows[0];
@@ -35,7 +35,8 @@ authRouter.post("/login", async (req, res, next) => {
       expiresIn: "8h",
     });
 
-    res.json({ token });
+    // usuario: para que el front sepa quién está conectado (ej. ocultar Aprobar en sus propios documentos)
+    res.json({ token, usuario: { id: usuario.id, nombre: usuario.nombre, email: usuario.email, rol: usuario.rol } });
   } catch (err) {
     next(err);
   }

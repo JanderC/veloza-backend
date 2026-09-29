@@ -105,7 +105,7 @@ export async function registrarTransaccion(input: RegistrarTransaccionInput) {
     const txResult = await client.query(
       `INSERT INTO transacciones
         (tipo, estado, tercero_id, caja_id, moneda_origen_id, monto_origen, metodo_pago_id, referencia_id, usuario_id, confirmada_en)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, CASE WHEN $2 = 'CONFIRMADA' THEN now() ELSE NULL END)
+       VALUES ($1,$2::estado_transaccion,$3,$4,$5,$6,$7,$8,$9, CASE WHEN $2::estado_transaccion = 'CONFIRMADA' THEN now() ELSE NULL END)
        RETURNING *`,
       [
         input.tipo,
@@ -324,7 +324,7 @@ export async function registrarCambioDivisa(input: RegistrarCambioInput) {
         (tipo, estado, tercero_id, caja_id, caja_destino_id, moneda_origen_id, monto_origen,
          moneda_destino_id, monto_destino, cotizacion_detalle_id, metodo_pago_id, referencia_id, usuario_id,
          tasa_aplicada, operacion_calculo, cuenta_tercero_id, confirmada_en)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, CASE WHEN $2 = 'CONFIRMADA' THEN now() ELSE NULL END)
+       VALUES ($1,$2::estado_transaccion,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, CASE WHEN $2::estado_transaccion = 'CONFIRMADA' THEN now() ELSE NULL END)
        RETURNING *`,
       [
         input.tipo,

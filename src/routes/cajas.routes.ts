@@ -23,11 +23,26 @@ const montoPositivo = z
   .regex(/^\d+(\.\d{1,4})?$/, "El monto debe ser un número positivo con hasta 4 decimales")
   .refine((v) => Number(v) > 0, "El monto debe ser mayor que cero");
 
+// Datos bancarios de una cuenta de la empresa: undefined = no tocar, null = borrar
+const textoOpcional = z.string().max(120).nullable().optional();
+const datosCuenta = {
+  banco: textoOpcional,
+  numeroCuenta: textoOpcional,
+  tipoCuenta: z.enum(["AHORRO", "CORRIENTE", "BILLETERA"]).nullable().optional(),
+  titular: textoOpcional,
+  identificacionTitular: textoOpcional,
+  telefono: textoOpcional,
+  email: z.string().trim().email("Email inválido").or(z.literal("")).nullable().optional(),
+  pais: textoOpcional,
+  monedaId: z.number().int().nullable().optional(),
+};
+
 const crearCajaSchema = z.object({
   nombre: z.string().trim().min(1, "El nombre es obligatorio"),
   tipo: tipoCaja,
   descripcion: z.string().optional(),
   esPrincipal: z.boolean().optional(),
+  ...datosCuenta,
 });
 
 // Dar de alta un banco nuevo es exactamente esto -- POST con tipo "BANCO".
@@ -119,6 +134,7 @@ const actualizarCajaSchema = z.object({
   tipo: tipoCaja.optional(),
   descripcion: z.string().nullable().optional(),
   activo: z.boolean().optional(),
+  ...datosCuenta,
 });
 
 function leerId(param: string | undefined) {

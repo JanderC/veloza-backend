@@ -225,7 +225,17 @@ CREATE TABLE public.cajas (
     activo boolean DEFAULT true NOT NULL,
     es_principal boolean DEFAULT false NOT NULL,
     descripcion text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    banco text,
+    numero_cuenta text,
+    tipo_cuenta text,
+    titular text,
+    identificacion_titular text,
+    telefono text,
+    email text,
+    pais text,
+    moneda_id integer,
+    CONSTRAINT cajas_tipo_cuenta_check CHECK (((tipo_cuenta IS NULL) OR (tipo_cuenta = ANY (ARRAY['AHORRO'::text, 'CORRIENTE'::text, 'BILLETERA'::text]))))
 );
 
 
@@ -507,7 +517,9 @@ ALTER SEQUENCE public.cuentas_por_pagar_id_seq OWNED BY public.cuentas_por_pagar
 CREATE TABLE public.metodos_pago (
     id integer NOT NULL,
     nombre text NOT NULL,
-    activo boolean DEFAULT true NOT NULL
+    activo boolean DEFAULT true NOT NULL,
+    cuenta_id integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -1409,6 +1421,13 @@ CREATE INDEX idx_transacciones_fecha ON public.transacciones USING btree (create
 
 
 --
+-- Name: idx_metodos_pago_cuenta; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_metodos_pago_cuenta ON public.metodos_pago USING btree (cuenta_id);
+
+
+--
 -- Name: idx_una_caja_principal; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1450,6 +1469,22 @@ ALTER TABLE ONLY public.abonos_cuenta
 
 ALTER TABLE ONLY public.abonos_cuenta
     ADD CONSTRAINT abonos_cuenta_cuenta_por_pagar_id_fkey FOREIGN KEY (cuenta_por_pagar_id) REFERENCES public.cuentas_por_pagar(id);
+
+
+--
+-- Name: cajas cajas_moneda_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cajas
+    ADD CONSTRAINT cajas_moneda_id_fkey FOREIGN KEY (moneda_id) REFERENCES public.monedas(id);
+
+
+--
+-- Name: metodos_pago metodos_pago_cuenta_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.metodos_pago
+    ADD CONSTRAINT metodos_pago_cuenta_id_fkey FOREIGN KEY (cuenta_id) REFERENCES public.cajas(id);
 
 
 --

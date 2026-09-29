@@ -28,7 +28,12 @@ export async function listarCajas(opciones: { incluirInactivas: boolean }) {
          SELECT json_agg(json_build_object('cierre_id', cc.id, 'moneda_id', cc.moneda_id, 'moneda_codigo', m.codigo) ORDER BY m.codigo)
          FROM cierres_caja cc JOIN monedas m ON m.id = cc.moneda_id
          WHERE cc.caja_id = c.id AND cc.estado = 'ABIERTA'
-       ), '[]') AS turnos_abiertos
+       ), '[]') AS turnos_abiertos,
+       (SELECT codigo FROM monedas WHERE id = c.moneda_id) AS moneda_codigo,
+       COALESCE((
+         SELECT json_agg(json_build_object('id', mp.id, 'nombre', mp.nombre) ORDER BY mp.nombre)
+         FROM metodos_pago mp WHERE mp.cuenta_id = c.id AND mp.activo
+       ), '[]') AS metodos_pago
      FROM cajas c
      ${opciones.incluirInactivas ? "" : "WHERE c.activo = true"}
      ORDER BY c.es_principal DESC, c.activo DESC, c.nombre`
@@ -36,7 +41,38 @@ export async function listarCajas(opciones: { incluirInactivas: boolean }) {
   return result.rows;
 }
 
-interface CrearCajaInput {
+// Datos bancarios de una cuenta de la empresa (caja tipo BANCO). Todos opcionales:
+// undefined = no tocar, null = borrar.
+export interface DatosCuenta {
+  banco?: string | null;
+  numeroCuenta?: string | null;
+  tipoCuenta?: "AHORRO" | "CORRIENTE" | "BILLETERA" | null;
+  titular?: string | null;
+  identificacionTitular?: string | null;
+  telefono?: string | null;
+  email?: string | null;
+  pais?: string | null;
+  monedaId?: number | null;
+}
+
+const COLUMNA_CUENTA: Record<keyof DatosCuenta, string> = {
+  banco: "banco",
+  numeroCuenta: "numero_cuenta",
+  tipoCuenta: "tipo_cuenta",
+  titular: "titular",
+  identificacionTitular: "identificacion_titular",
+  telefono: "telefono",
+  email: "email",
+  pais: "pais",
+  monedaId: "moneda_id",
+};
+
+function limpiarValor(valor: string | number | null | undefined) {
+  if (typeof valor === "string") return valor.trim() || null;
+  return valor ?? null;
+}
+
+interface CrearCajaInput extends DatosCuenta {
   nombre: string;
   tipo: TipoCaja;
   descripcion?: string;
@@ -48,9 +84,18 @@ export async function crearCaja(input: CrearCajaInput) {
   try {
     await client.query("BEGIN");
     if (input.esPrincipal) await client.query(`UPDATE cajas SET es_principal = false WHERE es_principal`);
+    const columnasCuenta = Object.keys(COLUMNA_CUENTA) as (keyof DatosCuenta)[];
     const result = await client.query(
-      `INSERT INTO cajas (nombre, tipo, descripcion, es_principal) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [input.nombre.trim(), input.tipo, input.descripcion?.trim() || null, input.esPrincipal ?? false]
+      `INSERT INTO cajas (nombre, tipo, descripcion, es_principal, ${columnasCuenta.map((c) => COLUMNA_CUENTA[c]).join(", ")})
+       VALUES ($1, $2, $3, $4, ${columnasCuenta.map((_, i) => `$${i + 5}`).join(", ")})
+       RETURNING *`,
+      [
+        input.nombre.trim(),
+        input.tipo,
+        input.descripcion?.trim() || null,
+        input.esPrincipal ?? false,
+        ...columnasCuenta.map((c) => limpiarValor(input[c])),
+      ]
     );
     await client.query("COMMIT");
     return result.rows[0];
@@ -62,7 +107,7 @@ export async function crearCaja(input: CrearCajaInput) {
   }
 }
 
-interface ActualizarCajaInput {
+interface ActualizarCajaInput extends DatosCuenta {
   nombre?: string;
   tipo?: TipoCaja;
   descripcion?: string | null;
@@ -85,30 +130,58 @@ export async function actualizarCaja(id: number, input: ActualizarCajaInput) {
     if (input.activo === false && caja.activo) {
       if (caja.es_principal) throw errorHttp("No se puede desactivar la caja principal. Marcá otra como principal primero.", 409);
 
-      const turnos = await client.query(`SELECT 1 FROM cierres_caja WHERE caja_id = $1 AND estado = 'ABIERTA' LIMIT 1`, [id]);
-      if (turnos.rows.length > 0) throw errorHttp("La caja tiene turnos abiertos. Cerralos antes de desactivarla.", 409);
-
-      const saldos = await client.query(`SELECT 1 FROM saldos_caja WHERE caja_id = $1 AND monto <> 0 LIMIT 1`, [id]);
-      if (saldos.rows.length > 0) throw errorHttp("La caja todavía tiene saldo. Transferilo a otra caja antes de desactivarla.", 409);
+      // Se juntan TODOS los motivos para que el admin los resuelva de una vez
+      const turnos = await client.query(
+        `SELECT m.codigo FROM cierres_caja cc JOIN monedas m ON m.id = cc.moneda_id
+         WHERE cc.caja_id = $1 AND cc.estado = 'ABIERTA' ORDER BY m.codigo`,
+        [id]
+      );
+      const saldos = await client.query(
+        `SELECT m.codigo, s.monto FROM saldos_caja s JOIN monedas m ON m.id = s.moneda_id
+         WHERE s.caja_id = $1 AND s.monto <> 0 ORDER BY m.codigo`,
+        [id]
+      );
+      const motivos: string[] = [];
+      if (turnos.rows.length > 0) {
+        motivos.push(`tiene turnos abiertos en ${turnos.rows.map((r) => r.codigo).join(", ")} (cerralos en Cierre de Caja)`);
+      }
+      if (saldos.rows.length > 0) {
+        const detalle = saldos.rows.map((r) => `${r.codigo} ${new Decimal(r.monto).toString()}`).join(", ");
+        motivos.push(`todavía tiene saldo: ${detalle} (transferilo a otra caja)`);
+      }
+      const metodos = await metodosVinculados(client, id);
+      if (metodos.length > 0) {
+        motivos.push(`tiene métodos de pago vinculados: ${metodos.join(", ")} (desvinculalos en Cuentas y Métodos de Pago)`);
+      }
+      if (motivos.length > 0) throw errorHttp(`No se puede desactivar "${caja.nombre}": ${motivos.join("; y ")}.`, 409);
     }
 
-    const result = await client.query(
-      `UPDATE cajas SET
-         nombre = COALESCE($2, nombre),
-         tipo = COALESCE($3, tipo),
-         descripcion = CASE WHEN $4::boolean THEN $5 ELSE descripcion END,
-         activo = COALESCE($6, activo)
-       WHERE id = $1
-       RETURNING *`,
-      [
-        id,
-        input.nombre?.trim() ?? null,
-        input.tipo ?? null,
-        input.descripcion !== undefined,
-        input.descripcion?.trim() || null,
-        input.activo ?? null,
-      ]
-    );
+    // Los métodos de pago solo se vinculan a cuentas (tipo BANCO)
+    if (input.tipo !== undefined && input.tipo !== "BANCO" && caja.tipo === "BANCO") {
+      const metodos = await metodosVinculados(client, id);
+      if (metodos.length > 0) {
+        throw errorHttp(`"${caja.nombre}" tiene métodos de pago vinculados (${metodos.join(", ")}): desvinculalos antes de cambiarle el tipo.`, 409);
+      }
+    }
+
+    // Solo se actualizan los campos que vinieron; null borra el valor
+    const cambios: Record<string, unknown> = {};
+    if (input.nombre !== undefined) cambios.nombre = input.nombre.trim();
+    if (input.tipo !== undefined) cambios.tipo = input.tipo;
+    if (input.descripcion !== undefined) cambios.descripcion = limpiarValor(input.descripcion);
+    if (input.activo !== undefined) cambios.activo = input.activo;
+    for (const campo of Object.keys(COLUMNA_CUENTA) as (keyof DatosCuenta)[]) {
+      if (input[campo] !== undefined) cambios[COLUMNA_CUENTA[campo]] = limpiarValor(input[campo]);
+    }
+
+    const columnas = Object.keys(cambios);
+    const result =
+      columnas.length === 0
+        ? cajaResult
+        : await client.query(
+            `UPDATE cajas SET ${columnas.map((c, i) => `${c} = $${i + 2}`).join(", ")} WHERE id = $1 RETURNING *`,
+            [id, ...columnas.map((c) => cambios[c])]
+          );
     await client.query("COMMIT");
     return result.rows[0];
   } catch (err) {
@@ -140,6 +213,11 @@ export async function marcarPrincipal(id: number) {
   }
 }
 
+async function metodosVinculados(client: PoolClient, cajaId: number): Promise<string[]> {
+  const result = await client.query(`SELECT nombre FROM metodos_pago WHERE cuenta_id = $1 AND activo ORDER BY nombre`, [cajaId]);
+  return result.rows.map((r) => r.nombre);
+}
+
 function traducirNombreDuplicado(err: unknown) {
   if (typeof err === "object" && err !== null && "code" in err && err.code === "23505") {
     return errorHttp("Ya existe una caja con ese nombre", 409);
@@ -153,6 +231,24 @@ async function obtenerCajaActiva(client: PoolClient, id: number) {
   if (!caja) throw errorHttp("Caja no encontrada", 404);
   if (!caja.activo) throw errorHttp(`La caja "${caja.nombre}" está inactiva`, 409);
   return caja;
+}
+
+/**
+ * Chequeo previo con mensaje claro ("Caja 1 no tiene turno abierto en USD").
+ * El bloqueo real lo sigue haciendo exigirTurnoAbierto dentro de cada pata.
+ */
+async function exigirTurnoConNombre(client: PoolClient, caja: { id: number; nombre: string }, monedaId: number, sugerencia: string) {
+  const result = await client.query(
+    `SELECT m.codigo, cc.id AS cierre_id
+     FROM monedas m LEFT JOIN cierres_caja cc ON cc.moneda_id = m.id AND cc.caja_id = $1 AND cc.estado = 'ABIERTA'
+     WHERE m.id = $2`,
+    [caja.id, monedaId]
+  );
+  const fila = result.rows[0];
+  if (!fila) throw errorHttp("Moneda no encontrada", 404);
+  if (fila.cierre_id === null) {
+    throw errorHttp(`"${caja.nombre}" no tiene turno abierto en ${fila.codigo}. ${sugerencia}`, 409);
+  }
 }
 
 // ---------- Fondeo: plata que entra al negocio (normalmente a la caja principal) ----------
@@ -178,9 +274,13 @@ export async function fondearCaja(input: FondearCajaInput) {
       if (principal.rows.length === 0) throw errorHttp("No hay una caja principal configurada", 409);
       cajaId = principal.rows[0].id as number;
     }
-    await obtenerCajaActiva(client, cajaId);
+    const caja = await obtenerCajaActiva(client, cajaId);
 
-    if (input.abrirTurno) await abrirTurnoSiFalta(client, cajaId, input.monedaId, input.usuarioId);
+    if (input.abrirTurno) {
+      await abrirTurnoSiFalta(client, cajaId, input.monedaId, input.usuarioId);
+    } else {
+      await exigirTurnoConNombre(client, caja, input.monedaId, "Abrilo en Cierre de Caja o marcá la opción de abrirlo al alimentar.");
+    }
 
     const txResult = await client.query(
       `INSERT INTO transacciones
@@ -237,17 +337,14 @@ export async function transferirEntreCajas(input: TransferirInput) {
     await client.query("BEGIN");
 
     const origen = await obtenerCajaActiva(client, input.cajaOrigenId);
-    await obtenerCajaActiva(client, input.cajaDestinoId);
+    const destino = await obtenerCajaActiva(client, input.cajaDestinoId);
 
-    const turnoOrigen = await client.query(
-      `SELECT 1 FROM cierres_caja WHERE caja_id = $1 AND moneda_id = $2 AND estado = 'ABIERTA'`,
-      [input.cajaOrigenId, input.monedaId]
-    );
-    if (turnoOrigen.rows.length === 0) {
-      throw errorHttp(`"${origen.nombre}" no tiene turno abierto en esta moneda. Abrilo en Cierre de Caja o alimentala primero.`, 409);
+    await exigirTurnoConNombre(client, origen, input.monedaId, "Abrilo en Cierre de Caja o alimentala primero.");
+    if (input.abrirTurnoDestino) {
+      await abrirTurnoSiFalta(client, input.cajaDestinoId, input.monedaId, input.usuarioId);
+    } else {
+      await exigirTurnoConNombre(client, destino, input.monedaId, "Abrilo en Cierre de Caja o marcá la opción de abrirlo al transferir.");
     }
-
-    if (input.abrirTurnoDestino) await abrirTurnoSiFalta(client, input.cajaDestinoId, input.monedaId, input.usuarioId);
 
     // Bloqueo en orden fijo: dos transferencias cruzadas (A→B y B→A) no se traban entre sí
     await client.query(

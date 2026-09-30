@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { notificarResultadoTransaccion } from "../services/whatsapp/outbox";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
 import {
@@ -90,6 +91,8 @@ transaccionesRouter.post(
 
       const verificacion = confirmarSchema.parse(req.body ?? undefined);
       const resultado = await confirmarTransaccion(id, req.user!.id, verificacion);
+      // Aviso al cliente por WhatsApp: va a la outbox, nunca en esta misma petición
+      notificarResultadoTransaccion(id, req.user!.id).catch((e) => console.error("[wa] aviso de confirmación", e));
       res.json(resultado);
     } catch (err) {
       next(err);
@@ -111,6 +114,7 @@ transaccionesRouter.post(
 
       const { motivo } = rechazarSchema.parse(req.body);
       const resultado = await rechazarTransaccion(id, req.user!.id, motivo);
+      notificarResultadoTransaccion(id, req.user!.id).catch((e) => console.error("[wa] aviso de rechazo", e));
       res.json(resultado);
     } catch (err) {
       next(err);

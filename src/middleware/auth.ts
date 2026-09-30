@@ -26,6 +26,16 @@ function esPayloadDeUsuario(payload: string | JwtPayload): payload is JwtPayload
   );
 }
 
+/** Usuario del token, o null si es inválido o venció. */
+export function verificarToken(token: string): AuthUser | null {
+  try {
+    const payload = jwt.verify(token, env.JWT_SECRET);
+    return esPayloadDeUsuario(payload) ? { id: payload.id, rol: payload.rol } : null;
+  } catch {
+    return null;
+  }
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
@@ -37,18 +47,12 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ error: "Token no proporcionado" });
   }
 
-  try {
-    const payload = jwt.verify(token, env.JWT_SECRET);
-
-    if (!esPayloadDeUsuario(payload)) {
-      return res.status(401).json({ error: "Token inválido o expirado" });
-    }
-
-    req.user = { id: payload.id, rol: payload.rol };
-    next();
-  } catch {
+  const usuario = verificarToken(token);
+  if (!usuario) {
     return res.status(401).json({ error: "Token inválido o expirado" });
   }
+  req.user = usuario;
+  next();
 }
 
 export function requireRole(...roles: AuthUser["rol"][]) {

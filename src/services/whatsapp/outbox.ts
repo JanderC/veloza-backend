@@ -1,3 +1,4 @@
+import QRCode from "qrcode";
 import { pool } from "../../db/pool";
 import { generarUrlTemporal } from "../almacenamiento.service";
 import { ahoraLocal, enRango, leerConfig } from "./config";
@@ -283,5 +284,7 @@ export async function enlaceRecibirPorWhatsapp(txId: number) {
   const numero = config.negocio.numeroWhatsapp.replace(/\D/g, "") || transporte().miJid()?.split("@")[0] || "";
   if (!numero) throw Object.assign(new Error("Falta configurar el número de WhatsApp del negocio"), { status: 409 });
   const texto = `Hola, quiero recibir el comprobante de mi operación VC-${txId}`;
-  return { url: `https://wa.me/${numero}?text=${encodeURIComponent(texto)}`, codigo: `VC-${txId}` };
+  const url = `https://wa.me/${numero}?text=${encodeURIComponent(texto)}`;
+  // QR para que el cliente lo escanee en el mostrador con su teléfono
+  return { url, codigo: `VC-${txId}`, qr: await QRCode.toDataURL(url, { margin: 1, width: 240 }) };
 }

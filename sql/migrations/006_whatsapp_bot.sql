@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS wa_mensajes (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 ALTER TABLE wa_mensajes ADD COLUMN IF NOT EXISTS media_bytes integer;
+-- Respuestas del bot: último mensaje del cliente que contestan (ordena el historial que ve la IA)
+ALTER TABLE wa_mensajes ADD COLUMN IF NOT EXISTS turno_hasta bigint;
 CREATE INDEX IF NOT EXISTS idx_wa_mensajes_jid ON wa_mensajes (jid, id DESC);
 CREATE INDEX IF NOT EXISTS idx_wa_mensajes_texto ON wa_mensajes USING gin (to_tsvector('simple', coalesce(texto, '')));
 

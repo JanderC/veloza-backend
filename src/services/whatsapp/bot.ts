@@ -2,7 +2,7 @@ import { pool } from "../../db/pool";
 import { ahoraLocal, claveDe, enHorarioAtencion, leerConfig, type ConfigWa } from "./config";
 import { ejecutarTurno, ErrorIA, type LlamadaHerramienta, type MensajeNeutro, type ParteImagen } from "./ia";
 import { definicionesHerramientas, ejecutarHerramienta, formatearMonto, type ContextoBot } from "./herramientas";
-import { obtenerChat, type EstadoConversacion, type FilaChat, type FilaMensaje } from "./mensajes";
+import { guardarEstadoConversacion, obtenerChat, type EstadoConversacion, type FilaChat, type FilaMensaje } from "./mensajes";
 import { enviarMensaje } from "./envio";
 import { leerMedia } from "./mediaMemoria";
 import { transporte } from "./transporte";
@@ -244,10 +244,12 @@ const ETIQUETA_MEDIA: Record<string, string> = {
 };
 
 async function historialDesdeBd(jid: string, hastaId: string, config: ConfigWa) {
+  // Las respuestas del bot van justo después del mensaje que contestan (turno_hasta), aunque
+  // se hayan guardado después de mensajes que llegaron mientras pensaba
   const r = await pool.query(
     `SELECT * FROM (
        SELECT * FROM wa_mensajes WHERE jid = $1 AND id <= $2 AND NOT interno ORDER BY id DESC LIMIT 30
-     ) x ORDER BY id`,
+     ) x ORDER BY COALESCE(turno_hasta::numeric + 0.5, id::numeric), id`,
     [jid, hastaId]
   );
   const filas: FilaMensaje[] = r.rows;
@@ -306,14 +308,14 @@ async function generarRespuesta(ctx: ContextoBot, chat: Pick<FilaChat, "nombre" 
 }
 
 /** Escribe como una persona: "escribiendo…" proporcional al largo y luego el mensaje. */
-async function enviarComoPersona(jid: string, partes: string[], seguirSi: () => Promise<boolean>) {
+async function enviarComoPersona(jid: string, partes: string[], seguirSi: () => Promise<boolean>, turnoHasta?: string) {
   const tr = transporte();
   for (const parte of partes) {
     await tr.presencia(jid, "composing").catch(() => {});
     await esperar(Math.min(7_000, Math.max(1_200, parte.length * 45)));
     await tr.presencia(jid, "paused").catch(() => {});
     if (!(await seguirSi())) return;
-    await enviarMensaje({ jid, autor: "bot", texto: parte });
+    await enviarMensaje({ jid, autor: "bot", texto: parte, turnoHasta });
   }
 }
 
@@ -333,10 +335,20 @@ async function turno(jid: string) {
   if (!chat || !chat.bot_activo || chat.necesita_humano) return;
 
   // hastaId: el turno solo ve hasta acá; lo que llegue después es del turno siguiente
-  const ultimo = (await pool.query(`SELECT id, autor, de_mi, wa_key FROM wa_mensajes WHERE jid = $1 AND NOT interno ORDER BY id DESC LIMIT 1`, [jid]))
-    .rows[0];
-  if (!ultimo || ultimo.de_mi) return; // ya se respondió
-  const hastaId = String(ultimo.id);
+  const tope = (
+    await pool.query(
+      `SELECT max(id) AS hasta, max(id) FILTER (WHERE autor = 'cliente') AS cliente,
+              max(id) FILTER (WHERE autor IN ('humano', 'telefono')) AS persona
+       FROM wa_mensajes WHERE jid = $1 AND NOT interno`,
+      [jid]
+    )
+  ).rows[0];
+  if (!tope?.cliente) return;
+  const hastaId = String(tope.hasta);
+  const ultimoCliente = String(tope.cliente);
+  // Ya lo contestó el bot, o una persona respondió después: nada que hacer
+  if (BigInt(ultimoCliente) <= BigInt(chat.estado?.respondidoHasta ?? "0")) return;
+  if (tope.persona && BigInt(tope.persona) > BigInt(ultimoCliente)) return;
 
   if (!config.horario.responderFueraDeHorario && !enHorarioAtencion(config)) return;
 
@@ -352,9 +364,8 @@ async function turno(jid: string) {
 
   // Leer (✓✓ azul) con una demora humana
   const noLeidos = await pool.query(
-    `SELECT wa_key FROM wa_mensajes WHERE jid = $1 AND autor = 'cliente' AND id <= $2
-       AND id > coalesce((SELECT max(id) FROM wa_mensajes WHERE jid = $1 AND de_mi AND NOT interno), 0)`,
-    [jid, hastaId]
+    `SELECT wa_key FROM wa_mensajes WHERE jid = $1 AND autor = 'cliente' AND id <= $2 AND id > $3`,
+    [jid, ultimoCliente, chat.estado?.respondidoHasta ?? "0"]
   );
   await esperar(azar(1_200, 4_000));
   const claves = noLeidos.rows.map((f) => f.wa_key).filter(Boolean);
@@ -372,7 +383,7 @@ async function turno(jid: string) {
     esDueno: false,
     ultimaFotoId,
     enviarSistema: async (texto) => {
-      await enviarMensaje({ jid, autor: "sistema", texto });
+      await enviarMensaje({ jid, autor: "sistema", texto, turnoHasta: ultimoCliente });
     },
     pasarAHumano: async (motivo) => {
       derivado = true;
@@ -388,6 +399,7 @@ async function turno(jid: string) {
     await marcarNecesitaHumano(jid, `el bot no pudo responder (${(err as Error).message.slice(0, 120)})`);
     return;
   }
+  await guardarEstadoConversacion(jid, { respondidoHasta: ultimoCliente });
 
   // Si mientras pensaba una persona escribió en el chat, el bot no responde encima
   const seguir = async () => {
@@ -400,7 +412,7 @@ async function turno(jid: string) {
     const actual = await obtenerChat(jid);
     return !!actual?.bot_activo;
   };
-  await enviarComoPersona(jid, resultado.partes, seguir);
+  await enviarComoPersona(jid, resultado.partes, seguir, ultimoCliente);
 }
 
 // ---------- Dueño: lo que no es una orden lo responde el bot sabiendo que es el dueño ----------

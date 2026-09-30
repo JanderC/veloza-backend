@@ -106,6 +106,7 @@ export interface OpcionesEnvio {
   texto?: string;
   imagen?: { buffer: Buffer; mime: string; mediaKey?: string | null };
   usuarioId?: number | null;
+  turnoHasta?: string | null;
   /** false = devuelve apenas queda en cola (el panel ve el ✓ por SSE) */
   esperarEnvio?: boolean;
 }
@@ -134,6 +135,7 @@ export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
     mediaBytes: op.imagen?.buffer.length ?? null,
     estado: "pendiente",
     usuarioId: op.usuarioId ?? null,
+    turnoHasta: op.turnoHasta ?? null,
   });
   if (!fila) throw new Error("No se pudo registrar el mensaje");
 

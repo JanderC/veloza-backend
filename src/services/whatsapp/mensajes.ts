@@ -41,6 +41,8 @@ export interface EstadoConversacion {
   };
   solicitudId?: number;
   comprobanteRecibido?: boolean;
+  /** Último mensaje del cliente (id) que el bot ya contestó */
+  respondidoHasta?: string;
 }
 
 export interface FilaMensaje {
@@ -59,6 +61,7 @@ export interface FilaMensaje {
   error: string | null;
   interno: boolean;
   usuario_id: number | null;
+  turno_hasta: string | null;
   created_at: string;
 }
 
@@ -132,6 +135,8 @@ interface NuevoMensaje {
   estado?: EstadoMensaje;
   interno?: boolean;
   usuarioId?: number | null;
+  /** Respuesta del bot: id del último mensaje del cliente que contesta */
+  turnoHasta?: string | null;
   fecha?: Date;
   /** false = historial sincronizado ("append"): no suma no leídos */
   cuentaNoLeido?: boolean;
@@ -141,8 +146,8 @@ interface NuevoMensaje {
 export async function guardarMensaje(m: NuevoMensaje): Promise<FilaMensaje | null> {
   const tipo = m.tipo ?? "texto";
   const r = await pool.query(
-    `INSERT INTO wa_mensajes (jid, wa_id, wa_key, de_mi, autor, tipo, texto, media_key, media_mime, media_bytes, estado, interno, usuario_id, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, COALESCE($14, now()))
+    `INSERT INTO wa_mensajes (jid, wa_id, wa_key, de_mi, autor, tipo, texto, media_key, media_mime, media_bytes, estado, interno, usuario_id, created_at, turno_hasta)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, COALESCE($14, now()), $15)
      ON CONFLICT (wa_id) DO NOTHING
      RETURNING *`,
     [
@@ -160,6 +165,7 @@ export async function guardarMensaje(m: NuevoMensaje): Promise<FilaMensaje | nul
       m.interno ?? false,
       m.usuarioId ?? null,
       m.fecha ?? null,
+      m.turnoHasta ?? null,
     ]
   );
   const fila: FilaMensaje | undefined = r.rows[0];

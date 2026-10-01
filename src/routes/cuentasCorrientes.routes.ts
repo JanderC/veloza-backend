@@ -3,9 +3,16 @@ import { z } from "zod";
 import multer from "multer";
 import { pool } from "../db/pool";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { registrarMovimientoCuentaCorriente } from "../services/cuentaCorriente.service";
-import { importarSaldosIniciales, ResultadoFila } from "../services/importacionSaldos.service"; 
-import { cambiarEstadoCuentaCorriente } from "../services/cuentaCorriente.service";
+import {
+  anularMovimiento,
+  cambiarEstadoCuentaCorriente,
+  crearCanal,
+  crearCuentaCorriente,
+  listarCuentasCorrientes,
+  obtenerEstadoCuenta,
+  registrarMovimientoCuentaCorriente,
+} from "../services/cuentaCorriente.service";
+import { importarSaldosIniciales, ResultadoFila } from "../services/importacionSaldos.service";
 
 export const cuentasCorrientesRouter = Router();
 const estadoSchema = z.object({ estado: z.enum(["DISPONIBLE", "BLOQUEADA", "CERRADA"]) });
@@ -22,6 +29,15 @@ cuentasCorrientesRouter.get("/canales", requireAuth, async (_req, res, next) => 
   }
 });
 
+
+cuentasCorrientesRouter.post("/canales", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const { nombre } = z.object({ nombre: z.string().trim().min(2).max(40) }).parse(req.body);
+    res.status(201).json(await crearCanal(nombre));
+  } catch (err) {
+    next(err);
+  }
+});
 
 cuentasCorrientesRouter.put("/:id/estado", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
   try {
@@ -50,38 +66,81 @@ cuentasCorrientesRouter.get("/categorias", requireAuth, async (_req, res, next) 
 
 // ---------- Cuentas corrientes ----------
 
+const entero = (v: unknown) => (typeof v === "string" && Number.isInteger(Number(v)) ? Number(v) : undefined);
+const fechaDia = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha en formato AAAA-MM-DD");
+
 cuentasCorrientesRouter.get("/", requireAuth, async (req, res, next) => {
   try {
-    const terceroIdParam = req.query.terceroId;
-    const canalIdParam = req.query.canalId;
-    const condiciones: string[] = [];
-    const valores: unknown[] = [];
-
-    if (typeof terceroIdParam === "string" && Number.isInteger(Number(terceroIdParam))) {
-      valores.push(Number(terceroIdParam));
-      condiciones.push(`cc.tercero_id = $${valores.length}`);
-    }
-    if (typeof canalIdParam === "string" && Number.isInteger(Number(canalIdParam))) {
-      valores.push(Number(canalIdParam));
-      condiciones.push(`cc.canal_id = $${valores.length}`);
-    }
-
-    const where = condiciones.length > 0 ? `WHERE ${condiciones.join(" AND ")}` : "";
-    const result = await pool.query(
-      `SELECT cc.*, t.nombre AS tercero_nombre, ch.nombre AS canal_nombre, m.codigo AS moneda_codigo
-       FROM cuentas_corrientes cc
-       JOIN terceros t ON t.id = cc.tercero_id
-       JOIN canales_cuenta_corriente ch ON ch.id = cc.canal_id
-       JOIN monedas m ON m.id = cc.moneda_id
-       ${where}
-       ORDER BY t.nombre, ch.nombre`,
-      valores
+    const tipo = typeof req.query.tipoTercero === "string" && ["CLIENTE", "PROVEEDOR", "MIXTO"].includes(req.query.tipoTercero) ? req.query.tipoTercero : undefined;
+    res.json(
+      await listarCuentasCorrientes({
+        terceroId: entero(req.query.terceroId),
+        canalId: entero(req.query.canalId),
+        buscar: typeof req.query.buscar === "string" ? req.query.buscar : undefined,
+        tipoTercero: tipo,
+      })
     );
-    res.json(result.rows);
   } catch (err) {
     next(err);
   }
 });
+
+// Abrir una cuenta: tercero existente o nuevo (proveedor/cliente) + canal de pago + moneda
+const crearCuentaSchema = z
+  .object({
+    terceroId: z.number().int().optional(),
+    nuevoTercero: z
+      .object({
+        nombre: z.string().trim().min(2),
+        tipo: z.enum(["CLIENTE", "PROVEEDOR", "MIXTO"]),
+        identificacion: z.string().optional(),
+        telefono: z.string().optional(),
+      })
+      .optional(),
+    canalId: z.number().int(),
+    monedaId: z.number().int(),
+    saldoInicial: z.string().optional(),
+  })
+  .refine((d) => d.terceroId !== undefined || d.nuevoTercero !== undefined, { message: "Elegí un tercero o creá uno nuevo" });
+
+cuentasCorrientesRouter.post("/", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const data = crearCuentaSchema.parse(req.body);
+    res.status(201).json(await crearCuentaCorriente({ ...data, usuarioId: req.user!.id }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// La "hoja" de la cuenta: saldo pendiente anterior, movimientos con total corrido y sumas
+cuentasCorrientesRouter.get("/:id/estado-cuenta", requireAuth, async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const filtros = z.object({ desde: fechaDia.optional(), hasta: fechaDia.optional() }).parse({
+      desde: req.query.desde || undefined,
+      hasta: req.query.hasta || undefined,
+    });
+    res.json(await obtenerEstadoCuenta(id, filtros));
+  } catch (err) {
+    next(err);
+  }
+});
+
+cuentasCorrientesRouter.post(
+  "/movimientos/:id/anular",
+  requireAuth,
+  requireRole("ADMIN", "ASESOR"),
+  async (req, res, next) => {
+    try {
+      const id = entero(req.params.id);
+      if (id === undefined) return res.status(400).json({ error: "id inválido" });
+      res.status(201).json(await anularMovimiento(id, req.user!.id));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 cuentasCorrientesRouter.get("/:id/movimientos", requireAuth, async (req, res, next) => {
   try {
@@ -106,7 +165,7 @@ const movimientoSchema = z.object({
   canalId: z.number().int(),
   monedaId: z.number().int(),
   tipo: z.enum(["COMPRA", "VENTA", "ABONO", "CARGO", "AJUSTE"]),
-  monto: z.string(),
+  monto: z.string().optional(), // si falta, se calcula como cantidadBase x tasa
   descripcion: z.string().optional(),
   cantidadBase: z.string().optional(),
   monedaBaseId: z.number().int().optional(),

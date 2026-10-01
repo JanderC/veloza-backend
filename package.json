@@ -11,7 +11,8 @@
     "start": "node dist/index.js",
     "db:migrate": "ts-node src/db/migrate.ts",
     "db:seed": "ts-node src/db/seed.ts",
-    "test:whatsapp": "ts-node pruebas/whatsapp.prueba.ts"
+    "test:whatsapp": "ts-node pruebas/whatsapp.prueba.ts",
+    "test:cuentas-corrientes": "ts-node pruebas/cuentasCorrientes.prueba.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.130.0",

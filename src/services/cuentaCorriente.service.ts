@@ -267,7 +267,7 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
 }
 
 const SELECT_CUENTA = `
-  SELECT cc.*, t.nombre AS tercero_nombre, t.tipo AS tercero_tipo, ch.nombre AS canal_nombre,
+  SELECT cc.*, t.nombre AS tercero_nombre, t.tipo AS tercero_tipo, t.telefono AS tercero_telefono, ch.nombre AS canal_nombre,
          m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,
          (SELECT max(fecha) FROM movimientos_cuenta_corriente WHERE cuenta_corriente_id = cc.id) AS ultimo_movimiento
   FROM cuentas_corrientes cc

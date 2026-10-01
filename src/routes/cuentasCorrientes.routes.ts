@@ -8,6 +8,7 @@ import {
   cambiarEstadoCuentaCorriente,
   crearCanal,
   crearCuentaCorriente,
+  generarExcelEstadoCuenta,
   listarCuentasCorrientes,
   obtenerEstadoCuenta,
   registrarMovimientoCuentaCorriente,
@@ -97,7 +98,7 @@ const crearCuentaSchema = z
         telefono: z.string().optional(),
       })
       .optional(),
-    canalId: z.number().int(),
+    canalId: z.number().int().optional(), // sin banco: no es obligatorio
     monedaId: z.number().int(),
     saldoInicial: z.string().optional(),
   })
@@ -122,6 +123,24 @@ cuentasCorrientesRouter.get("/:id/estado-cuenta", requireAuth, async (req, res, 
       hasta: req.query.hasta || undefined,
     });
     res.json(await obtenerEstadoCuenta(id, filtros));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// La misma hoja, descargada como Excel
+cuentasCorrientesRouter.get("/:id/excel", requireAuth, async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const filtros = z.object({ desde: fechaDia.optional(), hasta: fechaDia.optional() }).parse({
+      desde: req.query.desde || undefined,
+      hasta: req.query.hasta || undefined,
+    });
+    const archivo = await generarExcelEstadoCuenta(id, filtros);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="estado-cuenta-${id}.xlsx"`);
+    res.send(archivo);
   } catch (err) {
     next(err);
   }
@@ -170,6 +189,7 @@ const movimientoSchema = z.object({
   cantidadBase: z.string().optional(),
   monedaBaseId: z.number().int().optional(),
   tasa: z.string().optional(),
+  tasaEsPorcentaje: z.boolean().optional(),
   transaccionId: z.number().int().optional(),
   fecha: z.string().optional(),
   categoriaId: z.number().int().optional(),

@@ -1,5 +1,6 @@
 import { PoolClient } from "pg";
 import Decimal from "decimal.js";
+import * as XLSX from "xlsx";
 import { pool } from "../db/pool";
 import { exigirTurnoAbierto } from "./cierreCaja.service";
 
@@ -15,6 +16,8 @@ interface RegistrarMovimientoCCInput {
   cantidadBase?: string;
   monedaBaseId?: number;
   tasa?: string;
+  // true si la tasa es una comisión en % (viaja como fracción: 3% = "0.03")
+  tasaEsPorcentaje?: boolean;
   transaccionId?: number;
   usuarioId: number;
   fecha?: string;
@@ -105,14 +108,15 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
 
         const movResult = await client.query(
       `INSERT INTO movimientos_cuenta_corriente
-        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado)
-       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL)
+        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje)
+       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15)
        RETURNING *`,
       [
         cuenta.id, input.fecha ?? null, input.descripcion ?? null, input.tipo,
         input.cantidadBase ?? null, input.monedaBaseId ?? null, input.tasa ?? null,
         monto.toFixed(4), saldoAnterior.toFixed(4), saldoNuevo.toFixed(4),
         input.transaccionId ?? null, input.usuarioId, input.categoriaId ?? null, input.reversoDeId ?? null,
+        !!(input.tasaEsPorcentaje && tasa),
       ]
     );
 
@@ -208,14 +212,18 @@ const ZONA = "America/Bogota";
 interface CrearCuentaInput {
   terceroId?: number;
   nuevoTercero?: { nombre: string; tipo: "CLIENTE" | "PROVEEDOR" | "MIXTO"; identificacion?: string; telefono?: string };
-  canalId: number;
+  canalId?: number; // opcional: sin banco, la cuenta queda en el canal SIN_BANCO
   monedaId: number;
-  saldoInicial?: string; // con signo, como el "Saldo pendiente" con el que arranca la hoja del Excel
+  // con signo, como el "Saldo pendiente" con el que arranca la hoja del Excel: + me debe, - yo le debo
+  saldoInicial?: string;
   usuarioId: number;
 }
 
+export const CANAL_SIN_BANCO = "SIN_BANCO";
+
 export async function crearCuentaCorriente(input: CrearCuentaInput) {
   const saldoInicial = input.saldoInicial !== undefined ? aDecimal(input.saldoInicial, "El saldo inicial") : null;
+  const canalId = input.canalId ?? ((await crearCanal(CANAL_SIN_BANCO)).id as number);
   let terceroId = input.terceroId;
   if (!terceroId) {
     const n = input.nuevoTercero;
@@ -233,19 +241,21 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
 
   const existe = await pool.query(`SELECT id FROM cuentas_corrientes WHERE tercero_id = $1 AND canal_id = $2 AND moneda_id = $3`, [
     terceroId,
-    input.canalId,
+    canalId,
     input.monedaId,
   ]);
-  if (existe.rows[0]) throw errorHttp("Ese tercero ya tiene una cuenta con ese canal y esa moneda", 409);
+  if (existe.rows[0]) {
+    throw errorHttp(input.canalId ? "Ese tercero ya tiene una cuenta con ese canal y esa moneda" : "Ese tercero ya tiene una cuenta sin banco en esa moneda", 409);
+  }
 
   const cuenta = await pool.query(
     `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual) VALUES ($1, $2, $3, 0) RETURNING id`,
-    [terceroId, input.canalId, input.monedaId]
+    [terceroId, canalId, input.monedaId]
   );
   if (saldoInicial && !saldoInicial.isZero()) {
     await registrarMovimientoCuentaCorriente({
       terceroId,
-      canalId: input.canalId,
+      canalId,
       monedaId: input.monedaId,
       tipo: "AJUSTE",
       monto: saldoInicial.toFixed(4),
@@ -319,7 +329,7 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
        SELECT mc.*, sum(mc.monto) OVER (ORDER BY mc.fecha, mc.id) AS total
        FROM movimientos_cuenta_corriente mc WHERE mc.cuenta_corriente_id = $1
      )
-     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.monto, c.total, c.anulado, c.reverso_de_id,
+     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.monto, c.total, c.anulado, c.reverso_de_id,
             c.movimiento_caja_id, c.created_at, u.nombre AS usuario_nombre, mb.codigo AS moneda_base_codigo, cat.nombre AS categoria_nombre
      FROM corridos c
      JOIN usuarios u ON u.id = c.usuario_id
@@ -355,6 +365,59 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
   };
 }
 
+/**
+ * La misma hoja, en un .xlsx para mandarle al cliente: FECHA · REFERENCIA · CANTIDAD · TASA · MONTO · TOTAL.
+ * Los negativos (lo que yo le debo) salen en rojo y con signo, como en el Excel de siempre.
+ */
+export async function generarExcelEstadoCuenta(id: number, filtros: { desde?: string; hasta?: string }) {
+  const { cuenta, saldoAnterior, movimientos, sumas, abonos, saldoFinal } = await obtenerEstadoCuenta(id, filtros);
+  const fechaCorta = (f: string | Date) => new Date(f).toLocaleDateString("es-CO", { timeZone: ZONA, day: "2-digit", month: "2-digit", year: "numeric" });
+  const periodo = filtros.desde || filtros.hasta ? `Del ${filtros.desde ?? "inicio"} al ${filtros.hasta ?? "hoy"}` : "Todos los movimientos";
+  const final = new Decimal(saldoFinal);
+  const lectura = final.isZero() ? "Cuenta al día" : final.isNegative() ? "Saldo a favor del cliente (se le debe)" : "Saldo pendiente por pagar";
+
+  const filas: (string | number | null)[][] = [
+    [`Estado de cuenta — ${cuenta.tercero_nombre}`],
+    [`Moneda: ${cuenta.moneda_codigo}`, null, periodo],
+    [],
+    ["FECHA", "REFERENCIA", "CANTIDAD", "TASA", "MONTO", "TOTAL"],
+  ];
+  const encabezado = filas.length - 1;
+  if (filtros.desde) filas.push([null, "Saldo pendiente anterior", null, null, null, Number(saldoAnterior)]);
+  const porcentajes: number[] = []; // filas cuya tasa es una comisión en %
+  for (const m of movimientos) {
+    if (m.tasa_es_porcentaje) porcentajes.push(filas.length);
+    filas.push([
+      fechaCorta(m.fecha),
+      `${m.descripcion ?? m.tipo}${m.anulado && !m.reverso_de_id ? " (anulado)" : ""}`,
+      m.cantidad_base != null ? Number(m.cantidad_base) : null,
+      m.tasa != null ? Number(m.tasa) : null,
+      Number(m.monto),
+      Number(m.total),
+    ]);
+  }
+  filas.push([]);
+  filas.push([null, "Sumas del período", null, null, Number(sumas)]);
+  filas.push([null, "Abonos del período", null, null, Number(abonos)]);
+  filas.push([null, "SALDO PENDIENTE", null, null, null, Number(saldoFinal)]);
+  filas.push([null, lectura]);
+
+  const hoja = XLSX.utils.aoa_to_sheet(filas);
+  const dinero = "#,##0.##;[Red]-#,##0.##";
+  for (let f = encabezado + 1; f < filas.length; f++) {
+    for (const c of [2, 4, 5]) {
+      const celda = hoja[XLSX.utils.encode_cell({ r: f, c })];
+      if (celda?.t === "n") celda.z = dinero;
+    }
+    const tasa = hoja[XLSX.utils.encode_cell({ r: f, c: 3 })];
+    if (tasa?.t === "n") tasa.z = porcentajes.includes(f) ? "0.##%" : "#,##0.########";
+  }
+  hoja["!cols"] = [{ wch: 12 }, { wch: 38 }, { wch: 16 }, { wch: 10 }, { wch: 18 }, { wch: 18 }];
+  const libro = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(libro, hoja, "Estado de cuenta");
+  return XLSX.write(libro, { type: "buffer", bookType: "xlsx" }) as Buffer;
+}
+
 /** Un error no se borra: se registra el movimiento contrario (y el de caja, si lo hubo). */
 export async function anularMovimiento(movimientoId: number, usuarioId: number) {
   const r = await pool.query(
@@ -379,6 +442,7 @@ export async function anularMovimiento(movimientoId: number, usuarioId: number) 
     cantidadBase: m.cantidad_base != null && m.tasa != null ? new Decimal(m.cantidad_base).negated().toString() : undefined,
     monedaBaseId: m.moneda_base_id ?? undefined,
     tasa: m.cantidad_base != null && m.tasa != null ? new Decimal(m.tasa).toString() : undefined,
+    tasaEsPorcentaje: m.tasa_es_porcentaje,
     descripcion: `Reverso de: ${m.descripcion ?? m.tipo}`,
     fecha: new Date(m.fecha).toISOString(),
     usuarioId,

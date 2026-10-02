@@ -480,6 +480,26 @@ export async function generarExcelEstadoCuenta(id: number, filtros: { desde?: st
   return XLSX.write(libro, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }
 
+/**
+ * Las últimas tasas y porcentajes de comisión usados, para volver a aplicarlos sin escribirlos.
+ * Primero las de esta cuenta, después las del resto; la más reciente adelante.
+ */
+export async function obtenerTasasRecientes(cuentaId: number) {
+  const r = await pool.query(
+    `SELECT mc.tasa, mc.tasa_es_porcentaje, max(mc.id) AS ultimo, bool_or(mc.cuenta_corriente_id = $1) AS de_esta
+     FROM movimientos_cuenta_corriente mc
+     WHERE mc.tasa IS NOT NULL AND NOT mc.anulado
+       AND mc.id > (SELECT COALESCE(max(id), 0) - 3000 FROM movimientos_cuenta_corriente)
+     GROUP BY mc.tasa, mc.tasa_es_porcentaje
+     ORDER BY de_esta DESC, ultimo DESC`,
+    [cuentaId]
+  );
+  const tasas = r.rows.filter((f) => !f.tasa_es_porcentaje).slice(0, 5).map((f) => new Decimal(f.tasa).toFixed());
+  // La comisión se guarda como fracción (0.03): se devuelve como se escribe (3)
+  const porcentajes = r.rows.filter((f) => f.tasa_es_porcentaje).slice(0, 5).map((f) => new Decimal(f.tasa).times(100).toFixed());
+  return { tasas, porcentajes };
+}
+
 /** Un error no se borra: se registra el movimiento contrario (y el de caja, si lo hubo). */
 export async function anularMovimiento(movimientoId: number, usuarioId: number) {
   const r = await pool.query(

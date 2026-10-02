@@ -14,6 +14,7 @@ import {
   generarExcelEstadoCuenta,
   listarCuentasCorrientes,
   obtenerEstadoCuenta,
+  obtenerTasasRecientes,
   registrarMovimientoCuentaCorriente,
 } from "../services/cuentaCorriente.service";
 import { importarSaldosIniciales, ResultadoFila } from "../services/importacionSaldos.service";
@@ -165,6 +166,17 @@ cuentasCorrientesRouter.put("/:id/cobro", requireAuth, requireRole("ADMIN", "ASE
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     const datos = z.object({ monedaCobroId: z.number().int().nullable(), tasaCobro: z.string().optional() }).parse(req.body);
     res.json(await configurarCobroCuenta(id, datos));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Últimas tasas y comisiones usadas, para reutilizarlas al cargar un movimiento
+cuentasCorrientesRouter.get("/:id/tasas-recientes", requireAuth, async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    res.json(await obtenerTasasRecientes(id));
   } catch (err) {
     next(err);
   }

@@ -4,6 +4,7 @@ import multer from "multer";
 import { pool } from "../db/pool";
 import { requireAuth, requireRole } from "../middleware/auth";
 import {
+  actualizarCanal,
   anularMovimiento,
   cambiarEstadoCuentaCorriente,
   crearCanal,
@@ -35,6 +36,17 @@ cuentasCorrientesRouter.post("/canales", requireAuth, requireRole("ADMIN", "ASES
   try {
     const { nombre } = z.object({ nombre: z.string().trim().min(2).max(40) }).parse(req.body);
     res.status(201).json(await crearCanal(nombre));
+  } catch (err) {
+    next(err);
+  }
+});
+
+cuentasCorrientesRouter.put("/canales/:id", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    const cambios = z.object({ nombre: z.string().trim().min(2).max(40).optional(), activo: z.boolean().optional() }).parse(req.body);
+    res.json(await actualizarCanal(id, cambios));
   } catch (err) {
     next(err);
   }

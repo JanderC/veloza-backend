@@ -316,6 +316,24 @@ export async function crearCanal(nombre: string) {
   return r.rows[0];
 }
 
+/** Cambiar el nombre de un canal o quitarlo de la lista (se desactiva: las cuentas que lo usan lo conservan). */
+export async function actualizarCanal(id: number, cambios: { nombre?: string; activo?: boolean }) {
+  const actual = await pool.query(`SELECT nombre FROM canales_cuenta_corriente WHERE id = $1`, [id]);
+  if (!actual.rows[0]) throw errorHttp("Canal no encontrado", 404);
+  if (actual.rows[0].nombre === CANAL_SIN_BANCO) throw errorHttp("Esa opción es del sistema: no se puede cambiar", 409);
+  const limpio = cambios.nombre?.trim().toUpperCase().replace(/\s+/g, "_");
+  if (cambios.nombre !== undefined && !limpio) throw errorHttp("Escribí el nombre del canal", 400);
+  if (limpio) {
+    const repetido = await pool.query(`SELECT id FROM canales_cuenta_corriente WHERE nombre = $1 AND id <> $2`, [limpio, id]);
+    if (repetido.rows[0]) throw errorHttp("Ya hay otra opción con ese nombre", 409);
+  }
+  const r = await pool.query(
+    `UPDATE canales_cuenta_corriente SET nombre = COALESCE($2, nombre), activo = COALESCE($3, activo) WHERE id = $1 RETURNING *`,
+    [id, limpio ?? null, cambios.activo ?? null]
+  );
+  return r.rows[0];
+}
+
 /**
  * La hoja del Excel: saldo pendiente con el que arranca el período, cada movimiento con
  * su TOTAL corrido, y las sumas. El total se calcula en orden de fecha (no de carga), así

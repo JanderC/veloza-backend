@@ -213,6 +213,9 @@ interface CrearCuentaInput {
   terceroId?: number;
   nuevoTercero?: { nombre: string; tipo: "CLIENTE" | "PROVEEDOR" | "MIXTO"; identificacion?: string; telefono?: string };
   canalId?: number; // opcional: sin banco, la cuenta queda en el canal SIN_BANCO
+  // Si se le cobra en otra moneda que la de la contabilidad (ej. cuenta en USD, se cobra en COP): cuál y a qué tasa manual
+  monedaCobroId?: number;
+  tasaCobro?: string;
   modulo?: ModuloCuenta; // dónde se lleva: Cuentas Corrientes (por defecto) o Cuentas por Cobrar
   monedaId: number;
   // con signo, como el "Saldo pendiente" con el que arranca la hoja del Excel: + me debe, - yo le debo
@@ -223,9 +226,26 @@ interface CrearCuentaInput {
 export const CANAL_SIN_BANCO = "SIN_BANCO";
 export type ModuloCuenta = "CORRIENTE" | "POR_COBRAR";
 
+/** Cobrar en la misma moneda de la contabilidad no necesita tasa; en otra, la tasa manual es obligatoria. */
+function validarCobro(monedaId: number, monedaCobroId: number | null, tasaCobro?: string) {
+  if (!monedaCobroId || monedaCobroId === monedaId) return { monedaCobroId: null, tasaCobro: null };
+  const tasa = tasaCobro !== undefined ? aDecimal(tasaCobro, "La tasa de cobro") : null;
+  if (!tasa || tasa.lte(0)) throw errorHttp("Para cobrar en otra moneda hace falta la tasa", 400);
+  return { monedaCobroId, tasaCobro: tasa.toFixed(8) };
+}
+
+/** Cambiar en qué moneda se le cobra a la cuenta y a qué tasa. No toca el saldo: la contabilidad sigue en su moneda. */
+export async function configurarCobroCuenta(id: number, datos: { monedaCobroId: number | null; tasaCobro?: string }) {
+  const cuenta = await obtenerCuentaCorriente(id);
+  const cobro = validarCobro(cuenta.moneda_id, datos.monedaCobroId, datos.tasaCobro);
+  await pool.query(`UPDATE cuentas_corrientes SET moneda_cobro_id = $1, tasa_cobro = $2 WHERE id = $3`, [cobro.monedaCobroId, cobro.tasaCobro, id]);
+  return obtenerCuentaCorriente(id);
+}
+
 export async function crearCuentaCorriente(input: CrearCuentaInput) {
   const saldoInicial = input.saldoInicial !== undefined ? aDecimal(input.saldoInicial, "El saldo inicial") : null;
   const canalId = input.canalId ?? ((await crearCanal(CANAL_SIN_BANCO)).id as number);
+  const cobro = validarCobro(input.monedaId, input.monedaCobroId ?? null, input.tasaCobro);
   let terceroId = input.terceroId;
   if (!terceroId) {
     const n = input.nuevoTercero;
@@ -251,8 +271,8 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
   }
 
   const cuenta = await pool.query(
-    `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual, modulo) VALUES ($1, $2, $3, 0, $4) RETURNING id`,
-    [terceroId, canalId, input.monedaId, input.modulo ?? "CORRIENTE"]
+    `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual, modulo, moneda_cobro_id, tasa_cobro) VALUES ($1, $2, $3, 0, $4, $5, $6) RETURNING id`,
+    [terceroId, canalId, input.monedaId, input.modulo ?? "CORRIENTE", cobro.monedaCobroId, cobro.tasaCobro]
   );
   if (saldoInicial && !saldoInicial.isZero()) {
     await registrarMovimientoCuentaCorriente({
@@ -271,11 +291,13 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
 const SELECT_CUENTA = `
   SELECT cc.*, t.nombre AS tercero_nombre, t.tipo AS tercero_tipo, t.telefono AS tercero_telefono, ch.nombre AS canal_nombre,
          m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,
+         mcob.codigo AS moneda_cobro_codigo, mcob.decimales AS moneda_cobro_decimales,
          (SELECT max(fecha) FROM movimientos_cuenta_corriente WHERE cuenta_corriente_id = cc.id) AS ultimo_movimiento
   FROM cuentas_corrientes cc
   JOIN terceros t ON t.id = cc.tercero_id
   JOIN canales_cuenta_corriente ch ON ch.id = cc.canal_id
-  JOIN monedas m ON m.id = cc.moneda_id`;
+  JOIN monedas m ON m.id = cc.moneda_id
+  LEFT JOIN monedas mcob ON mcob.id = cc.moneda_cobro_id`;
 
 export async function obtenerCuentaCorriente(id: number) {
   const r = await pool.query(`${SELECT_CUENTA} WHERE cc.id = $1`, [id]);
@@ -437,6 +459,10 @@ export async function generarExcelEstadoCuenta(id: number, filtros: { desde?: st
   filas.push([null, "Abonos del período", null, null, Number(abonos)]);
   filas.push([null, "SALDO PENDIENTE", null, null, null, Number(saldoFinal)]);
   filas.push([null, lectura]);
+  if (cuenta.moneda_cobro_codigo && cuenta.tasa_cobro && !final.isZero()) {
+    const equivalente = final.abs().times(cuenta.tasa_cobro).toDecimalPlaces(Number(cuenta.moneda_cobro_decimales), Decimal.ROUND_HALF_UP);
+    filas.push([null, `Equivale a ${equivalente.toNumber().toLocaleString("es-CO")} ${cuenta.moneda_cobro_codigo} (tasa ${new Decimal(cuenta.tasa_cobro).toNumber().toLocaleString("es-CO")})`]);
+  }
 
   const hoja = XLSX.utils.aoa_to_sheet(filas);
   const dinero = "#,##0.##;[Red]-#,##0.##";

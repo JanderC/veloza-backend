@@ -8,6 +8,7 @@ import {
   anularMovimiento,
   cambiarEstadoCuentaCorriente,
   cambiarModuloCuentaCorriente,
+  configurarCobroCuenta,
   crearCanal,
   crearCuentaCorriente,
   generarExcelEstadoCuenta,
@@ -116,6 +117,8 @@ const crearCuentaSchema = z
     monedaId: z.number().int(),
     saldoInicial: z.string().optional(),
     modulo: z.enum(["CORRIENTE", "POR_COBRAR"]).optional(),
+    monedaCobroId: z.number().int().optional(),
+    tasaCobro: z.string().optional(),
   })
   .refine((d) => d.terceroId !== undefined || d.nuevoTercero !== undefined, { message: "Elegí un tercero o creá uno nuevo" });
 
@@ -150,6 +153,18 @@ cuentasCorrientesRouter.put("/:id/modulo", requireAuth, requireRole("ADMIN", "AS
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     const { modulo } = z.object({ modulo: z.enum(["CORRIENTE", "POR_COBRAR"]) }).parse(req.body);
     res.json(await cambiarModuloCuentaCorriente(id, modulo));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// En qué moneda se le cobra (y a qué tasa manual) cuando no es la de la contabilidad
+cuentasCorrientesRouter.put("/:id/cobro", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const datos = z.object({ monedaCobroId: z.number().int().nullable(), tasaCobro: z.string().optional() }).parse(req.body);
+    res.json(await configurarCobroCuenta(id, datos));
   } catch (err) {
     next(err);
   }

@@ -213,6 +213,7 @@ interface CrearCuentaInput {
   terceroId?: number;
   nuevoTercero?: { nombre: string; tipo: "CLIENTE" | "PROVEEDOR" | "MIXTO"; identificacion?: string; telefono?: string };
   canalId?: number; // opcional: sin banco, la cuenta queda en el canal SIN_BANCO
+  modulo?: ModuloCuenta; // dónde se lleva: Cuentas Corrientes (por defecto) o Cuentas por Cobrar
   monedaId: number;
   // con signo, como el "Saldo pendiente" con el que arranca la hoja del Excel: + me debe, - yo le debo
   saldoInicial?: string;
@@ -220,6 +221,7 @@ interface CrearCuentaInput {
 }
 
 export const CANAL_SIN_BANCO = "SIN_BANCO";
+export type ModuloCuenta = "CORRIENTE" | "POR_COBRAR";
 
 export async function crearCuentaCorriente(input: CrearCuentaInput) {
   const saldoInicial = input.saldoInicial !== undefined ? aDecimal(input.saldoInicial, "El saldo inicial") : null;
@@ -249,8 +251,8 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
   }
 
   const cuenta = await pool.query(
-    `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual) VALUES ($1, $2, $3, 0) RETURNING id`,
-    [terceroId, canalId, input.monedaId]
+    `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual, modulo) VALUES ($1, $2, $3, 0, $4) RETURNING id`,
+    [terceroId, canalId, input.monedaId, input.modulo ?? "CORRIENTE"]
   );
   if (saldoInicial && !saldoInicial.isZero()) {
     await registrarMovimientoCuentaCorriente({
@@ -281,8 +283,24 @@ export async function obtenerCuentaCorriente(id: number) {
   return r.rows[0];
 }
 
-export async function listarCuentasCorrientes(filtros: { terceroId?: number; canalId?: number; buscar?: string; tipoTercero?: string }) {
+/** Pasar una cuenta a Cuentas por Cobrar (sale de la lista de Cuentas Corrientes) o devolverla. No toca saldo ni movimientos. */
+export async function cambiarModuloCuentaCorriente(id: number, modulo: ModuloCuenta) {
+  const r = await pool.query(`UPDATE cuentas_corrientes SET modulo = $1 WHERE id = $2 RETURNING id`, [modulo, id]);
+  if (!r.rows[0]) throw errorHttp("Cuenta corriente no encontrada", 404);
+  return obtenerCuentaCorriente(id);
+}
+
+export async function listarCuentasCorrientes(filtros: {
+  terceroId?: number;
+  canalId?: number;
+  buscar?: string;
+  tipoTercero?: string;
+  // corrientes: las que se llevan en Cuentas Corrientes. cobrar: las pasadas a Cuentas por Cobrar + toda cuenta con saldo (me deben o yo debo)
+  vista?: "corrientes" | "cobrar";
+}) {
   const cond: string[] = [];
+  if (filtros.vista === "corrientes") cond.push(`cc.modulo = 'CORRIENTE'`);
+  if (filtros.vista === "cobrar") cond.push(`(cc.modulo = 'POR_COBRAR' OR cc.saldo_actual <> 0)`);
   const valores: unknown[] = [];
   if (filtros.terceroId) {
     valores.push(filtros.terceroId);

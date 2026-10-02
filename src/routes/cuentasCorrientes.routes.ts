@@ -7,6 +7,7 @@ import {
   actualizarCanal,
   anularMovimiento,
   cambiarEstadoCuentaCorriente,
+  cambiarModuloCuentaCorriente,
   crearCanal,
   crearCuentaCorriente,
   generarExcelEstadoCuenta,
@@ -91,6 +92,7 @@ cuentasCorrientesRouter.get("/", requireAuth, async (req, res, next) => {
         canalId: entero(req.query.canalId),
         buscar: typeof req.query.buscar === "string" ? req.query.buscar : undefined,
         tipoTercero: tipo,
+        vista: req.query.vista === "corrientes" || req.query.vista === "cobrar" ? req.query.vista : undefined,
       })
     );
   } catch (err) {
@@ -113,6 +115,7 @@ const crearCuentaSchema = z
     canalId: z.number().int().optional(), // sin banco: no es obligatorio
     monedaId: z.number().int(),
     saldoInicial: z.string().optional(),
+    modulo: z.enum(["CORRIENTE", "POR_COBRAR"]).optional(),
   })
   .refine((d) => d.terceroId !== undefined || d.nuevoTercero !== undefined, { message: "Elegí un tercero o creá uno nuevo" });
 
@@ -135,6 +138,18 @@ cuentasCorrientesRouter.get("/:id/estado-cuenta", requireAuth, async (req, res, 
       hasta: req.query.hasta || undefined,
     });
     res.json(await obtenerEstadoCuenta(id, filtros));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Pasar la cuenta a Cuentas por Cobrar o devolverla a Cuentas Corrientes
+cuentasCorrientesRouter.put("/:id/modulo", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const { modulo } = z.object({ modulo: z.enum(["CORRIENTE", "POR_COBRAR"]) }).parse(req.body);
+    res.json(await cambiarModuloCuentaCorriente(id, modulo));
   } catch (err) {
     next(err);
   }

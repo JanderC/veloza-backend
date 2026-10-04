@@ -306,10 +306,51 @@ const SELECT_CUENTA = `
   JOIN monedas m ON m.id = cc.moneda_id
   LEFT JOIN monedas mcob ON mcob.id = cc.moneda_cobro_id`;
 
+/**
+ * Cuánto vale en pesos cada moneda, según la última tasa usada en los movimientos de las cuentas en pesos.
+ * La moneda de la tasa se saca de la referencia (Zelle, USDT, bss...) y, si no lo dice, de su tamaño.
+ */
+async function valoresDeMonedas(): Promise<Record<string, string>> {
+  const r = await pool.query(
+    `SELECT DISTINCT ON (clase) clase, tasa FROM (
+       SELECT mc.id, mc.tasa,
+         CASE WHEN mc.descripcion ~* 'euro' THEN 'EUR'
+              WHEN mc.descripcion ~* 'usdt' THEN 'USDT'
+              WHEN mc.descripcion ~* 'zelle|d[oó]lar' THEN 'USD'
+              WHEN mc.descripcion ~* 'bss|bol[ií]var|pago m[oó]vil' THEN 'VES'
+              WHEN mc.tasa >= 1000 THEN 'USD'
+              WHEN mc.tasa >= 2 AND mc.tasa < 100 THEN 'VES' END AS clase
+       FROM movimientos_cuenta_corriente mc
+       JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+       JOIN monedas m ON m.id = cc.moneda_id
+       WHERE m.codigo = 'COP' AND mc.tasa IS NOT NULL AND NOT mc.tasa_es_porcentaje AND NOT mc.anulado
+     ) x WHERE clase IS NOT NULL ORDER BY clase, id DESC`
+  );
+  const valores: Record<string, string> = {};
+  for (const f of r.rows) valores[f.clase] = new Decimal(f.tasa).toFixed();
+  if (!valores.USDT && valores.USD) valores.USDT = valores.USD;
+  return valores;
+}
+
+/** A cada cuenta que no es en pesos le agrega valor_moneda: cuántos pesos vale 1 de su moneda (la tasa de cobro si la tiene). */
+async function conValorMoneda<T extends Record<string, any>>(cuentas: T[]): Promise<T[]> {
+  if (!cuentas.some((c) => c.moneda_codigo !== "COP")) return cuentas.map((c) => ({ ...c, valor_moneda: null }));
+  const valores = await valoresDeMonedas();
+  return cuentas.map((c) => ({
+    ...c,
+    valor_moneda:
+      c.moneda_codigo === "COP"
+        ? null
+        : c.moneda_cobro_codigo === "COP" && c.tasa_cobro
+          ? new Decimal(c.tasa_cobro).toFixed()
+          : (valores[c.moneda_codigo] ?? null),
+  }));
+}
+
 export async function obtenerCuentaCorriente(id: number) {
   const r = await pool.query(`${SELECT_CUENTA} WHERE cc.id = $1`, [id]);
   if (!r.rows[0]) throw errorHttp("Cuenta corriente no encontrada", 404);
-  return r.rows[0];
+  return (await conValorMoneda([r.rows[0]]))[0];
 }
 
 /** Pasar una cuenta a Cuentas por Cobrar (sale de la lista de Cuentas Corrientes) o devolverla. No toca saldo ni movimientos. */
@@ -348,7 +389,7 @@ export async function listarCuentasCorrientes(filtros: {
     cond.push(`t.nombre ILIKE $${valores.length}`);
   }
   const r = await pool.query(`${SELECT_CUENTA} ${cond.length ? `WHERE ${cond.join(" AND ")}` : ""} ORDER BY t.nombre, ch.nombre`, valores);
-  return r.rows;
+  return conValorMoneda(r.rows);
 }
 
 export async function crearCanal(nombre: string) {

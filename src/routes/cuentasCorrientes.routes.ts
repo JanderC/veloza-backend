@@ -6,12 +6,14 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import {
   actualizarCanal,
   anularMovimiento,
+  buscarMovimientoPorNumero,
   cambiarEstadoCuentaCorriente,
   cambiarModuloCuentaCorriente,
   cerrarDiaCuentaCorriente,
   configurarCobroCuenta,
   crearCanal,
   crearCuentaCorriente,
+  eliminarCuentaCorriente,
   generarExcelEstadoCuenta,
   guardarTasaHabitual,
   listarCuentasCorrientes,
@@ -203,6 +205,28 @@ cuentasCorrientesRouter.put("/:id/tasa-habitual", requireAuth, requireRole("ADMI
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     const { tasa } = z.object({ tasa: z.string() }).parse(req.body);
     res.json(await guardarTasaHabitual(id, tasa));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ¿Ya se registró un movimiento con ese número de transferencia? (para no cargarlo dos veces)
+cuentasCorrientesRouter.get("/movimientos/numero/:numero", requireAuth, async (req, res, next) => {
+  try {
+    const numero = z.string().regex(/^\d{4,30}$/).parse(req.params.numero);
+    res.json({ movimiento: await buscarMovimientoPorNumero(numero) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Eliminar la cuenta: deja de aparecer en las listas (los movimientos se conservan)
+cuentasCorrientesRouter.delete("/:id", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    await eliminarCuentaCorriente(id);
+    res.status(204).end();
   } catch (err) {
     next(err);
   }

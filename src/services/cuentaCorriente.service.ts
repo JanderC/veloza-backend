@@ -263,11 +263,16 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
     terceroId = r.rows[0].id as number;
   }
 
-  const existe = await pool.query(`SELECT id FROM cuentas_corrientes WHERE tercero_id = $1 AND canal_id = $2 AND moneda_id = $3`, [
+  const existe = await pool.query(`SELECT id, activo FROM cuentas_corrientes WHERE tercero_id = $1 AND canal_id = $2 AND moneda_id = $3`, [
     terceroId,
     canalId,
     input.monedaId,
   ]);
+  // Una cuenta eliminada vuelve a aparecer tal como estaba (sus movimientos nunca se borran)
+  if (existe.rows[0] && !existe.rows[0].activo) {
+    await pool.query(`UPDATE cuentas_corrientes SET activo = true WHERE id = $1`, [existe.rows[0].id]);
+    return obtenerCuentaCorriente(existe.rows[0].id);
+  }
   if (existe.rows[0]) {
     throw errorHttp(input.canalId ? "Ese tercero ya tiene una cuenta con ese canal y esa moneda" : "Ese tercero ya tiene una cuenta sin banco en esa moneda", 409);
   }
@@ -355,6 +360,30 @@ export async function obtenerCuentaCorriente(id: number) {
   return (await conValorMoneda([r.rows[0]]))[0];
 }
 
+/** Eliminar una cuenta: deja de listarse. Los movimientos no se borran; si se vuelve a crear, reaparece como estaba. */
+export async function eliminarCuentaCorriente(id: number) {
+  const r = await pool.query(`UPDATE cuentas_corrientes SET activo = false WHERE id = $1 RETURNING id`, [id]);
+  if (!r.rows[0]) throw errorHttp("Cuenta corriente no encontrada", 404);
+}
+
+/**
+ * ¿Ya hay un movimiento con ese número de transferencia? Se busca en lo anotado después de la referencia
+ * ("Abono Zelle · Juan 123456"), en todas las cuentas, sin contar los anulados.
+ */
+export async function buscarMovimientoPorNumero(numero: string) {
+  const r = await pool.query(
+    `SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, t.nombre AS tercero_nombre
+     FROM movimientos_cuenta_corriente mc
+     JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+     JOIN terceros t ON t.id = cc.tercero_id
+     WHERE NOT mc.anulado AND position(' · ' in mc.descripcion) > 0
+       AND regexp_replace(split_part(mc.descripcion, ' · ', 2), ' \([0-9.,]+ [A-Z]{3,5} a [0-9.,]+\)$', '') ~ ('(^|[^0-9])' || $1 || '([^0-9]|$)')
+     ORDER BY mc.id DESC LIMIT 1`,
+    [numero]
+  );
+  return r.rows[0] ?? null;
+}
+
 /** Pasar una cuenta a Cuentas por Cobrar (sale de la lista de Cuentas Corrientes) o devolverla. No toca saldo ni movimientos. */
 export async function cambiarModuloCuentaCorriente(id: number, modulo: ModuloCuenta) {
   const r = await pool.query(`UPDATE cuentas_corrientes SET modulo = $1 WHERE id = $2 RETURNING id`, [modulo, id]);
@@ -370,7 +399,7 @@ export async function listarCuentasCorrientes(filtros: {
   // corrientes: las que se llevan en Cuentas Corrientes. cobrar: las pasadas a Cuentas por Cobrar + toda cuenta con saldo (me deben o yo debo)
   vista?: "corrientes" | "cobrar";
 }) {
-  const cond: string[] = [];
+  const cond: string[] = ["cc.activo"]; // las eliminadas no se listan
   if (filtros.vista === "corrientes") cond.push(`cc.modulo = 'CORRIENTE'`);
   if (filtros.vista === "cobrar") cond.push(`(cc.modulo = 'POR_COBRAR' OR cc.saldo_actual <> 0)`);
   const valores: unknown[] = [];

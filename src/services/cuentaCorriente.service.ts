@@ -30,6 +30,7 @@ interface RegistrarMovimientoCCInput {
   monedaCajaId?: number; // moneda de la caja; si no se manda, se usa monedaId
   metodoPagoId?: number;
   reversoDeId?: number;
+  cuentaDestino?: string; // a qué cuenta del cliente se le pagó (opcional)
 }
 
 function errorHttp(mensaje: string, status: number) {
@@ -108,8 +109,8 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
 
         const movResult = await client.query(
       `INSERT INTO movimientos_cuenta_corriente
-        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje)
-       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15)
+        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje, cuenta_destino)
+       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15, $16)
        RETURNING *`,
       [
         cuenta.id, input.fecha ?? null, input.descripcion ?? null, input.tipo,
@@ -117,6 +118,7 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
         monto.toFixed(4), saldoAnterior.toFixed(4), saldoNuevo.toFixed(4),
         input.transaccionId ?? null, input.usuarioId, input.categoriaId ?? null, input.reversoDeId ?? null,
         !!(input.tasaEsPorcentaje && tasa),
+        input.cuentaDestino?.trim() || null,
       ]
     );
 
@@ -435,7 +437,7 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
        SELECT mc.*, sum(mc.monto) OVER (ORDER BY mc.fecha, mc.id) AS total
        FROM movimientos_cuenta_corriente mc WHERE mc.cuenta_corriente_id = $1
      )
-     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.monto, c.total, c.anulado, c.reverso_de_id,
+     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
             c.movimiento_caja_id, c.created_at, u.nombre AS usuario_nombre, mb.codigo AS moneda_base_codigo, cat.nombre AS categoria_nombre
      FROM corridos c
      JOIN usuarios u ON u.id = c.usuario_id
@@ -519,7 +521,7 @@ export async function generarExcelEstadoCuenta(id: number, filtros: { desde?: st
     if (m.tasa_es_porcentaje) porcentajes.push(filas.length);
     filas.push([
       fechaCorta(m.fecha),
-      `${m.descripcion ?? m.tipo}${m.anulado && !m.reverso_de_id ? " (anulado)" : ""}`,
+      `${m.descripcion ?? m.tipo}${m.cuenta_destino ? ` → ${m.cuenta_destino}` : ""}${m.anulado && !m.reverso_de_id ? " (anulado)" : ""}`,
       m.cantidad_base != null ? Number(m.cantidad_base) : null,
       m.tasa != null ? Number(m.tasa) : null,
       Number(m.monto),

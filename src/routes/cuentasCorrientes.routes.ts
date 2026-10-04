@@ -8,6 +8,7 @@ import {
   anularMovimiento,
   cambiarEstadoCuentaCorriente,
   cambiarModuloCuentaCorriente,
+  cerrarDiaCuentaCorriente,
   configurarCobroCuenta,
   crearCanal,
   crearCuentaCorriente,
@@ -177,6 +178,18 @@ cuentasCorrientesRouter.get("/:id/tasas-recientes", requireAuth, async (req, res
     const id = entero(req.params.id);
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     res.json(await obtenerTasasRecientes(id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Cierre diario de la cuenta: queda anotado el saldo con el que cerró ese día
+cuentasCorrientesRouter.post("/:id/cierres", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const { dia } = z.object({ dia: fechaDia }).parse(req.body);
+    res.status(201).json(await cerrarDiaCuentaCorriente(id, dia, req.user!.id));
   } catch (err) {
     next(err);
   }

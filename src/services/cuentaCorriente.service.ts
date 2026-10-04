@@ -413,14 +413,38 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
     else abonos = abonos.plus(monto);
   }
   const saldoFinal = r.rows.length ? new Decimal(r.rows[r.rows.length - 1].total) : saldoAnterior;
+  // Si se está viendo un solo día: con qué saldo se cerró (si ya se cerró)
+  const cierre =
+    filtros.desde && filtros.desde === filtros.hasta
+      ? (
+          await pool.query(
+            `SELECT c.saldo_final, c.created_at, u.nombre AS usuario_nombre
+             FROM cierres_cuenta_corriente c JOIN usuarios u ON u.id = c.usuario_id
+             WHERE c.cuenta_corriente_id = $1 AND c.dia = $2::date`,
+            [id, filtros.desde]
+          )
+        ).rows[0] ?? null
+      : null;
   return {
     cuenta,
+    cierre,
     saldoAnterior: saldoAnterior.toFixed(4),
     movimientos: r.rows,
     sumas: sumas.toFixed(4),
     abonos: abonos.toFixed(4),
     saldoFinal: saldoFinal.toFixed(4),
   };
+}
+
+/** Cierre diario: deja anotado con qué saldo se cerró el día. Volver a cerrar el mismo día lo actualiza. */
+export async function cerrarDiaCuentaCorriente(id: number, dia: string, usuarioId: number) {
+  const { saldoFinal } = await obtenerEstadoCuenta(id, { desde: dia, hasta: dia });
+  await pool.query(
+    `INSERT INTO cierres_cuenta_corriente (cuenta_corriente_id, dia, saldo_final, usuario_id) VALUES ($1, $2::date, $3, $4)
+     ON CONFLICT (cuenta_corriente_id, dia) DO UPDATE SET saldo_final = EXCLUDED.saldo_final, usuario_id = EXCLUDED.usuario_id, created_at = now()`,
+    [id, dia, saldoFinal, usuarioId]
+  );
+  return obtenerEstadoCuenta(id, { desde: dia, hasta: dia });
 }
 
 /**

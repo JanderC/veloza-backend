@@ -211,7 +211,7 @@ const ZONA = "America/Bogota";
 
 interface CrearCuentaInput {
   terceroId?: number;
-  nuevoTercero?: { nombre: string; tipo: "CLIENTE" | "PROVEEDOR" | "MIXTO"; identificacion?: string; telefono?: string };
+  nuevoTercero?: { nombre: string; tipo: "CLIENTE" | "PROVEEDOR" | "MIXTO" | "AMIGO"; identificacion?: string; telefono?: string };
   canalId?: number; // opcional: sin banco, la cuenta queda en el canal SIN_BANCO
   // Si se le cobra en otra moneda que la de la contabilidad (ej. cuenta en USD, se cobra en COP): cuál y a qué tasa manual
   monedaCobroId?: number;

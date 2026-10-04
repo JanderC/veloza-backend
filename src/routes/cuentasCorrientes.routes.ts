@@ -89,7 +89,7 @@ const fechaDia = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha en formato AAAA-
 
 cuentasCorrientesRouter.get("/", requireAuth, async (req, res, next) => {
   try {
-    const tipo = typeof req.query.tipoTercero === "string" && ["CLIENTE", "PROVEEDOR", "MIXTO"].includes(req.query.tipoTercero) ? req.query.tipoTercero : undefined;
+    const tipo = typeof req.query.tipoTercero === "string" && ["CLIENTE", "PROVEEDOR", "MIXTO", "AMIGO"].includes(req.query.tipoTercero) ? req.query.tipoTercero : undefined;
     res.json(
       await listarCuentasCorrientes({
         terceroId: entero(req.query.terceroId),
@@ -111,7 +111,7 @@ const crearCuentaSchema = z
     nuevoTercero: z
       .object({
         nombre: z.string().trim().min(2),
-        tipo: z.enum(["CLIENTE", "PROVEEDOR", "MIXTO"]),
+        tipo: z.enum(["CLIENTE", "PROVEEDOR", "MIXTO", "AMIGO"]),
         identificacion: z.string().optional(),
         telefono: z.string().optional(),
       })

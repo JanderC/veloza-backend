@@ -20,7 +20,7 @@ export interface ResultadoFila {
   cuentaCorrienteId?: number;
 }
 
-const TIPOS_TERCERO_VALIDOS = ["CLIENTE", "PROVEEDOR", "MIXTO"];
+const TIPOS_TERCERO_VALIDOS = ["CLIENTE", "PROVEEDOR", "MIXTO", "AMIGO"];
 
 async function obtenerOCrearTercero(nombre: string, identificacion: string | null, tipo: string) {
   if (identificacion) {
@@ -87,7 +87,7 @@ export async function importarSaldosIniciales(buffer: Buffer, usuarioId: number)
     try {
       const tipo = fila.Tipo?.toString().trim().toUpperCase() ?? "MIXTO";
       if (!TIPOS_TERCERO_VALIDOS.includes(tipo)) {
-        throw new Error(`Tipo de tercero inválido: "${fila.Tipo}". Debe ser CLIENTE, PROVEEDOR o MIXTO`);
+        throw new Error(`Tipo de tercero inválido: "${fila.Tipo}". Debe ser CLIENTE, PROVEEDOR, MIXTO o AMIGO`);
       }
 
       const nombreCanal = fila.Canal?.toString().trim().toUpperCase();

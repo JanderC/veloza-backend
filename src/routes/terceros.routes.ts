@@ -10,7 +10,7 @@ const crearTerceroSchema = z.object({
   nombre: z.string().min(1),
   identificacion: z.string().optional(),
   telefono: z.string().optional(),
-  tipo: z.enum(["CLIENTE", "PROVEEDOR", "MIXTO"]),
+  tipo: z.enum(["CLIENTE", "PROVEEDOR", "MIXTO", "AMIGO"]),
 });
 
 tercerosRouter.post("/", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {

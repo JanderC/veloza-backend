@@ -13,6 +13,7 @@ import {
   crearCanal,
   crearCuentaCorriente,
   generarExcelEstadoCuenta,
+  guardarTasaHabitual,
   listarCuentasCorrientes,
   obtenerEstadoCuenta,
   obtenerTasasRecientes,
@@ -190,6 +191,18 @@ cuentasCorrientesRouter.post("/:id/cierres", requireAuth, requireRole("ADMIN", "
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     const { dia } = z.object({ dia: fechaDia }).parse(req.body);
     res.status(201).json(await cerrarDiaCuentaCorriente(id, dia, req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// La tasa que queda puesta en el formulario de la cuenta
+cuentasCorrientesRouter.put("/:id/tasa-habitual", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const { tasa } = z.object({ tasa: z.string() }).parse(req.body);
+    res.json(await guardarTasaHabitual(id, tasa));
   } catch (err) {
     next(err);
   }

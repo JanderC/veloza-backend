@@ -292,6 +292,13 @@ const SELECT_CUENTA = `
   SELECT cc.*, t.nombre AS tercero_nombre, t.tipo AS tercero_tipo, t.telefono AS tercero_telefono, ch.nombre AS canal_nombre,
          m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,
          mcob.codigo AS moneda_cobro_codigo, mcob.decimales AS moneda_cobro_decimales,
+         -- lo de hoy: lo que le vendí (suma) y lo que me vendió o abonó (resta)
+         (SELECT COALESCE(sum(mh.monto), 0) FROM movimientos_cuenta_corriente mh
+           WHERE mh.cuenta_corriente_id = cc.id AND NOT mh.anulado AND mh.monto > 0
+             AND (mh.fecha AT TIME ZONE 'America/Bogota')::date = (now() AT TIME ZONE 'America/Bogota')::date) AS vendido_hoy,
+         (SELECT COALESCE(sum(mh.monto), 0) FROM movimientos_cuenta_corriente mh
+           WHERE mh.cuenta_corriente_id = cc.id AND NOT mh.anulado AND mh.monto < 0
+             AND (mh.fecha AT TIME ZONE 'America/Bogota')::date = (now() AT TIME ZONE 'America/Bogota')::date) AS abonado_hoy,
          (SELECT max(fecha) FROM movimientos_cuenta_corriente WHERE cuenta_corriente_id = cc.id) AS ultimo_movimiento
   FROM cuentas_corrientes cc
   JOIN terceros t ON t.id = cc.tercero_id
@@ -521,7 +528,35 @@ export async function obtenerTasasRecientes(cuentaId: number) {
   const tasas = r.rows.filter((f) => !f.tasa_es_porcentaje).slice(0, 5).map((f) => new Decimal(f.tasa).toFixed());
   // La comisión se guarda como fracción (0.03): se devuelve como se escribe (3)
   const porcentajes = r.rows.filter((f) => f.tasa_es_porcentaje).slice(0, 5).map((f) => new Decimal(f.tasa).times(100).toFixed());
-  return { tasas, porcentajes };
+  // La tasa que queda puesta en el formulario: la fijada en la cuenta o, si no hay, la última usada en ella
+  const cuenta = await pool.query(`SELECT tasa_habitual FROM cuentas_corrientes WHERE id = $1`, [cuentaId]);
+  const ultimaDeEsta = r.rows.find((f) => f.de_esta && !f.tasa_es_porcentaje);
+  const fijada = cuenta.rows[0]?.tasa_habitual ?? ultimaDeEsta?.tasa ?? null;
+  // La referencia que más se usa con esta persona (sin el nombre de quien envió ni el detalle del cobro)
+  const ref = await pool.query(
+    `SELECT regexp_replace(split_part(descripcion, ' · ', 1), ' \([0-9.,]+ [A-Z]{3,5} a [0-9.,]+\)$', '') AS referencia, count(*) AS veces, max(id) AS ultimo
+     FROM (SELECT id, descripcion FROM movimientos_cuenta_corriente
+           WHERE cuenta_corriente_id = $1 AND NOT anulado AND descripcion IS NOT NULL
+             AND descripcion NOT LIKE 'Reverso de%' AND descripcion <> 'Saldo pendiente inicial'
+           ORDER BY id DESC LIMIT 300) recientes
+     GROUP BY 1 ORDER BY veces DESC, ultimo DESC LIMIT 1`,
+    [cuentaId]
+  );
+  return {
+    tasas,
+    porcentajes,
+    tasaHabitual: fijada != null ? new Decimal(fijada).toFixed() : null,
+    referenciaFrecuente: (ref.rows[0]?.referencia as string | undefined) ?? null,
+  };
+}
+
+/** Fijar la tasa que queda puesta en el formulario de esta cuenta. */
+export async function guardarTasaHabitual(id: number, tasa: string) {
+  const valor = aDecimal(tasa, "La tasa");
+  if (valor.lte(0)) throw errorHttp("La tasa debe ser mayor a cero", 400);
+  const r = await pool.query(`UPDATE cuentas_corrientes SET tasa_habitual = $1 WHERE id = $2 RETURNING id`, [valor.toFixed(8), id]);
+  if (!r.rows[0]) throw errorHttp("Cuenta corriente no encontrada", 404);
+  return { tasaHabitual: valor.toFixed() };
 }
 
 /** Un error no se borra: se registra el movimiento contrario (y el de caja, si lo hubo). */

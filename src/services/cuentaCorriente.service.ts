@@ -301,7 +301,7 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
 }
 
 const SELECT_CUENTA = `
-  SELECT cc.*, t.nombre AS tercero_nombre, t.tipo AS tercero_tipo, t.telefono AS tercero_telefono, ch.nombre AS canal_nombre,
+  SELECT cc.*, t.nombre AS tercero_nombre, t.tipo AS tercero_tipo, t.telefono AS tercero_telefono, t.identificacion AS tercero_identificacion, ch.nombre AS canal_nombre,
          m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,
          mcob.codigo AS moneda_cobro_codigo, mcob.decimales AS moneda_cobro_decimales,
          -- lo de hoy: lo que le vendí (suma) y lo que me vendió o abonó (resta)
@@ -441,8 +441,17 @@ export async function listarCuentasCorrientes(filtros: {
     cond.push(`t.tipo::text = $${valores.length}`);
   }
   if (filtros.buscar?.trim()) {
-    valores.push(`%${filtros.buscar.trim()}%`);
-    cond.push(`t.nombre ILIKE $${valores.length}`);
+    // Por nombre, por cédula o por teléfono (comparando solo los dígitos, sin espacios ni +)
+    const texto = filtros.buscar.trim();
+    valores.push(`%${texto}%`);
+    const porTexto = `(t.nombre ILIKE $${valores.length} OR t.identificacion ILIKE $${valores.length})`;
+    const digitos = texto.replace(/\D/g, "");
+    if (digitos.length >= 3) {
+      valores.push(`%${digitos}%`);
+      cond.push(`(${porTexto} OR regexp_replace(COALESCE(t.telefono, ''), '\\D', '', 'g') LIKE $${valores.length} OR regexp_replace(COALESCE(t.identificacion, ''), '\\D', '', 'g') LIKE $${valores.length})`);
+    } else {
+      cond.push(porTexto);
+    }
   }
   const r = await pool.query(`${SELECT_CUENTA} ${cond.length ? `WHERE ${cond.join(" AND ")}` : ""} ORDER BY t.nombre, ch.nombre`, valores);
   return conValorMoneda(r.rows);

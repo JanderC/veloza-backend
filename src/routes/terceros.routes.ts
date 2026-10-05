@@ -111,6 +111,8 @@ tercerosRouter.put("/:id", requireAuth, requireRole("ADMIN", "ASESOR"), async (r
     );
     res.json(result.rows[0]);
   } catch (err) {
+    // la cédula es única: si ya la tiene otro, se dice claro en vez de un error genérico
+    if ((err as { code?: string }).code === "23505") return res.status(409).json({ error: "Esa cédula ya está registrada en otro cliente" });
     next(err);
   }
 });

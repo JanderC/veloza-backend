@@ -2,7 +2,7 @@ import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import * as XLSX from "xlsx";
 import { pool } from "../db/pool";
-import { exigirTurnoAbierto } from "./cierreCaja.service";
+import { abrirTurnoSiFalta } from "./cierreCaja.service";
 import { enviarMensaje } from "./whatsapp/envio";
 import { asegurarChat } from "./whatsapp/mensajes";
 import { jidDeTelefono } from "./whatsapp/transporte";
@@ -133,7 +133,8 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
       const tipoMovimiento = montoCaja.isPositive() ? "INGRESO" : "EGRESO";
       const montoAbsoluto = montoCaja.abs();
 
-      await exigirTurnoAbierto(client, input.cajaId, monedaCajaId);
+      // Como en los fondeos: si la caja no tiene turno abierto en esa moneda, se abre con este movimiento
+      await abrirTurnoSiFalta(client, input.cajaId, monedaCajaId, input.usuarioId);
 
       const saldoCajaResult = await client.query(
         `SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`,

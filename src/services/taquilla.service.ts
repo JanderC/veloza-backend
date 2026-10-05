@@ -111,12 +111,21 @@ export async function obtenerTaquilla() {
     ? await pool.query(`${SELECT_SOLICITUD} AND mc.pagado_en >= $1 ORDER BY mc.pagado_en DESC`, [abiertaEn])
     : await pool.query(`${SELECT_SOLICITUD} AND (mc.pagado_en AT TIME ZONE '${ZONA}')::date = (now() AT TIME ZONE '${ZONA}')::date ORDER BY mc.pagado_en DESC`);
 
+  // Ingresos y egresos de ventanilla: los de esta sesión (o de hoy) y todo lo que siga pendiente de confirmar
+  const operaciones = await pool.query(
+    `${SELECT_OPERACION}
+     WHERE o.estado = 'PENDIENTE' OR ${abierta ? "o.created_at >= $1" : `(o.created_at AT TIME ZONE '${ZONA}')::date = (now() AT TIME ZONE '${ZONA}')::date`}
+     ORDER BY o.id DESC`,
+    abierta ? [abiertaEn] : []
+  );
+
   // Pagos hechos por Bancolombia en el mismo período: cuántos y cuánto. No tocan la caja.
   const porBanco = pagadas.rows.filter((s) => s.pagado_medio === "BANCOLOMBIA");
   const totalesBanco = new Map<string, Decimal>();
   for (const s of porBanco) totalesBanco.set(s.moneda_codigo, (totalesBanco.get(s.moneda_codigo) ?? new Decimal(0)).plus(s.monto));
 
   return {
+    operaciones: operaciones.rows,
     pagosBancolombia: { cantidad: porBanco.length, totales: [...totalesBanco.entries()].map(([codigo, total]) => ({ codigo, total: total.toFixed(4) })) },
     caja: { ...caja, saldos: porMoneda },
     sesion: { abierta, abierta_en: abiertaEn, abierta_por: abierta ? (turnos.rows[0].usuario_nombre as string) : null },
@@ -302,5 +311,114 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
     await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_en = NULL, pagado_por = NULL, pagado_medio = NULL WHERE id = $1`, [movimientoId]);
     throw err;
   }
+  return obtenerTaquilla();
+}
+
+// ---------- Ingresos y egresos de ventanilla ----------
+const SELECT_OPERACION = `
+  SELECT o.id, o.tipo, o.cantidad, o.tasa, o.comision_pct, o.total, o.descripcion, o.cliente_nombre, o.cliente_telefono, o.cliente_cedula,
+         o.estado, o.created_at, o.confirmado_en, m.codigo AS moneda_codigo, u.nombre AS usuario_nombre, uc.nombre AS confirmado_por_nombre
+  FROM operaciones_taquilla o
+  JOIN monedas m ON m.id = o.moneda_id
+  JOIN usuarios u ON u.id = o.usuario_id
+  LEFT JOIN usuarios uc ON uc.id = o.confirmado_por`;
+
+/** Suma (delta > 0) o descuenta (delta < 0) de la caja, sin dejarla en negativo. Dentro de una transacción. */
+async function aplicarACaja(client: PoolClient, cajaId: number, monedaId: number, delta: Decimal, usuarioId: number) {
+  const abierta = await client.query(`SELECT 1 FROM cierres_caja WHERE caja_id = $1 AND moneda_id = $2 AND estado = 'ABIERTA' FOR SHARE`, [cajaId, monedaId]);
+  if (!abierta.rows.length) throw errorHttp("Primero hay que abrir la caja de taquilla", 409);
+  const saldo = await client.query(`SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`, [cajaId, monedaId]);
+  const nuevo = new Decimal(saldo.rows[0]?.monto ?? 0).plus(delta);
+  if (nuevo.isNegative()) throw errorHttp("La caja no tiene tanto para ese egreso", 409);
+  await fijarSaldo(client, cajaId, monedaId, nuevo, usuarioId);
+}
+
+interface OperacionInput {
+  tipo: "INGRESO" | "EGRESO";
+  monedaCodigo: string; // en qué entra o sale de la caja: COP, USD o EUR
+  cantidad: string; // lo que se compró o vendió (ej. 100.000 bolívares)
+  tasa?: string; // cantidad x tasa = total
+  comisionPct?: string; // % que se descuenta del total
+  descripcion?: string;
+  clienteNombre?: string;
+  clienteTelefono?: string;
+  clienteCedula?: string;
+  confirmada?: boolean; // un ingreso ya confirmado suma a la caja de una vez
+  usuarioId: number;
+}
+
+/**
+ * Registra un ingreso o egreso de ventanilla. total = cantidad x tasa, menos la comisión.
+ * El egreso descuenta de la caja al registrarlo. El ingreso queda pendiente y suma cuando se confirma
+ * (o de una vez si llega ya confirmado).
+ */
+export async function crearOperacionTaquilla(input: OperacionInput) {
+  const caja = await cajaDeTaquilla();
+  const moneda = (await monedasDeTaquilla()).find((m) => m.codigo === input.monedaCodigo);
+  if (!moneda) throw errorHttp("La caja de taquilla solo maneja pesos, dólares y euros", 400);
+  const cantidad = aDecimal(input.cantidad, "El monto");
+  if (cantidad.isZero()) throw errorHttp("El monto no puede ser cero", 400);
+  const tasa = input.tasa?.trim() ? aDecimal(input.tasa, "La tasa") : null;
+  if (tasa && tasa.isZero()) throw errorHttp("La tasa no puede ser cero", 400);
+  const comision = input.comisionPct?.trim() ? aDecimal(input.comisionPct, "La comisión") : null;
+  if (comision && comision.gte(100)) throw errorHttp("La comisión tiene que ser menor al 100%", 400);
+  const total = cantidad
+    .times(tasa ?? 1)
+    .times(new Decimal(1).minus((comision ?? new Decimal(0)).div(100)))
+    .toDecimalPlaces(Number(moneda.decimales), Decimal.ROUND_HALF_UP);
+  if (!total.isPositive()) throw errorHttp("El total da cero: revisá el monto, la tasa y la comisión", 400);
+
+  // El egreso sale de la caja ya; el ingreso, solo si viene confirmado
+  const aplica = input.tipo === "EGRESO" || !!input.confirmada;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    if (aplica) await aplicarACaja(client, caja.id, moneda.id, input.tipo === "INGRESO" ? total : total.negated(), input.usuarioId);
+    await client.query(
+      `INSERT INTO operaciones_taquilla
+        (tipo, moneda_id, cantidad, tasa, comision_pct, total, descripcion, cliente_nombre, cliente_telefono, cliente_cedula, estado, usuario_id, confirmado_en, confirmado_por)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $13 THEN now() END, CASE WHEN $13 THEN $12::int END)`,
+      [
+        input.tipo, moneda.id, cantidad.toFixed(4), tasa?.toFixed(8) ?? null, comision?.toFixed(4) ?? null, total.toFixed(4),
+        input.descripcion?.trim() || null, input.clienteNombre?.trim() || null, input.clienteTelefono?.trim() || null, input.clienteCedula?.trim() || null,
+        aplica ? "CONFIRMADA" : "PENDIENTE", input.usuarioId, aplica,
+      ]
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+  return obtenerTaquilla();
+}
+
+/** Confirmar un ingreso pendiente: recién ahí suma a la caja. */
+export async function confirmarOperacionTaquilla(id: number, usuarioId: number) {
+  const caja = await cajaDeTaquilla();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const r = await client.query(`SELECT * FROM operaciones_taquilla WHERE id = $1 FOR UPDATE`, [id]);
+    const o = r.rows[0];
+    if (!o) throw errorHttp("Operación no encontrada", 404);
+    if (o.estado !== "PENDIENTE") throw errorHttp("Esa operación ya no está pendiente", 409);
+    await aplicarACaja(client, caja.id, o.moneda_id, o.tipo === "INGRESO" ? new Decimal(o.total) : new Decimal(o.total).negated(), usuarioId);
+    await client.query(`UPDATE operaciones_taquilla SET estado = 'CONFIRMADA', confirmado_en = now(), confirmado_por = $2 WHERE id = $1`, [id, usuarioId]);
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+  return obtenerTaquilla();
+}
+
+/** Descartar un ingreso pendiente (todavía no había tocado la caja). */
+export async function anularOperacionTaquilla(id: number) {
+  const r = await pool.query(`UPDATE operaciones_taquilla SET estado = 'ANULADA' WHERE id = $1 AND estado = 'PENDIENTE' RETURNING id`, [id]);
+  if (!r.rows[0]) throw errorHttp("Solo se puede anular una operación que siga pendiente", 409);
   return obtenerTaquilla();
 }

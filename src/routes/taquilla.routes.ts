@@ -1,7 +1,16 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { abrirSesionTaquilla, cerrarSesionTaquilla, moverCajaTaquilla, obtenerTaquilla, pagarSolicitud } from "../services/taquilla.service";
+import {
+  abrirSesionTaquilla,
+  anularOperacionTaquilla,
+  cerrarSesionTaquilla,
+  confirmarOperacionTaquilla,
+  crearOperacionTaquilla,
+  moverCajaTaquilla,
+  obtenerTaquilla,
+  pagarSolicitud,
+} from "../services/taquilla.service";
 
 export const taquillaRouter = Router();
 const ROLES = requireRole("ADMIN", "ASESOR", "CAJERO");
@@ -53,6 +62,49 @@ taquillaRouter.post("/solicitudes/:id/pagar", requireAuth, ROLES, async (req, re
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
     const { medio } = z.object({ medio: z.enum(["EFECTIVO", "BANCOLOMBIA"]).default("EFECTIVO") }).parse(req.body ?? {});
     res.json(await pagarSolicitud(id, req.user!.id, medio));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Ingresos y egresos de ventanilla ----------
+const operacionSchema = z.object({
+  tipo: z.enum(["INGRESO", "EGRESO"]),
+  monedaCodigo: z.enum(["COP", "USD", "EUR"]),
+  cantidad: z.string(),
+  tasa: z.string().optional(),
+  comisionPct: z.string().optional(),
+  descripcion: z.string().max(300).optional(),
+  clienteNombre: z.string().max(120).optional(),
+  clienteTelefono: z.string().max(40).optional(),
+  clienteCedula: z.string().max(40).optional(),
+  confirmada: z.boolean().optional(),
+});
+
+taquillaRouter.post("/operaciones", requireAuth, ROLES, async (req, res, next) => {
+  try {
+    res.status(201).json(await crearOperacionTaquilla({ ...operacionSchema.parse(req.body), usuarioId: req.user!.id }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Confirmar un ingreso pendiente: ahí suma a la caja
+taquillaRouter.post("/operaciones/:id/confirmar", requireAuth, ROLES, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    res.json(await confirmarOperacionTaquilla(id, req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+taquillaRouter.post("/operaciones/:id/anular", requireAuth, ROLES, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    res.json(await anularOperacionTaquilla(id));
   } catch (err) {
     next(err);
   }

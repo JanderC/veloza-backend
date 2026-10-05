@@ -34,6 +34,8 @@ interface RegistrarMovimientoCCInput {
   metodoPagoId?: number;
   reversoDeId?: number;
   cuentaDestino?: string; // a qué cuenta del cliente se le pagó (opcional)
+  // Comisión descontada del monto: la tasa viaja como factor (4% -> "0.96") y cantidad × factor = lo que queda
+  comisionDescontada?: boolean;
 }
 
 function errorHttp(mensaje: string, status: number) {
@@ -112,18 +114,31 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
 
         const movResult = await client.query(
       `INSERT INTO movimientos_cuenta_corriente
-        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje, cuenta_destino)
-       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15, $16)
+        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje, cuenta_destino, comision_descontada)
+       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15, $16, $17)
        RETURNING *`,
       [
         cuenta.id, input.fecha ?? null, input.descripcion ?? null, input.tipo,
         input.cantidadBase ?? null, input.monedaBaseId ?? null, input.tasa ?? null,
         monto.toFixed(4), saldoAnterior.toFixed(4), saldoNuevo.toFixed(4),
         input.transaccionId ?? null, input.usuarioId, input.categoriaId ?? null, input.reversoDeId ?? null,
-        !!(input.tasaEsPorcentaje && tasa),
+        !!((input.tasaEsPorcentaje || input.comisionDescontada) && tasa),
         input.cuentaDestino?.trim() || null,
+        !!(input.comisionDescontada && tasa),
       ]
     );
+
+    // La fórmula del cliente se guarda con su primer movimiento: por tasa o con comisión descontada
+    if (cuenta.formula == null && tasa && !input.reversoDeId) {
+      if (input.comisionDescontada) {
+        await client.query(`UPDATE cuentas_corrientes SET formula = 'COMISION', comision_pct = $1 WHERE id = $2`, [
+          new Decimal(1).minus(tasa).times(100).toFixed(4),
+          cuenta.id,
+        ]);
+      } else if (!input.tasaEsPorcentaje) {
+        await client.query(`UPDATE cuentas_corrientes SET formula = 'TASA', tasa_habitual = COALESCE(tasa_habitual, $1) WHERE id = $2`, [tasa.toFixed(8), cuenta.id]);
+      }
+    }
 
     // ---------- 2) Caja física, SOLO si este movimiento también mueve efectivo ----------
     let movimientoCaja = null;
@@ -500,7 +515,7 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
        SELECT mc.*, sum(mc.monto) OVER (ORDER BY mc.fecha, mc.id) AS total
        FROM movimientos_cuenta_corriente mc WHERE mc.cuenta_corriente_id = $1
      )
-     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
+     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.comision_descontada, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
             c.movimiento_caja_id, c.created_at, u.nombre AS usuario_nombre, mb.codigo AS moneda_base_codigo, cat.nombre AS categoria_nombre
      FROM corridos c
      JOIN usuarios u ON u.id = c.usuario_id
@@ -581,12 +596,13 @@ export async function generarExcelEstadoCuenta(id: number, filtros: { desde?: st
   if (filtros.desde) filas.push([null, "Saldo pendiente anterior", null, null, null, Number(saldoAnterior)]);
   const porcentajes: number[] = []; // filas cuya tasa es una comisión en %
   for (const m of movimientos) {
-    if (m.tasa_es_porcentaje) porcentajes.push(filas.length);
+    if (m.tasa_es_porcentaje && !m.comision_descontada) porcentajes.push(filas.length);
     filas.push([
       fechaCorta(m.fecha),
       `${m.descripcion ?? m.tipo}${m.cuenta_destino ? ` → ${m.cuenta_destino}` : ""}${m.anulado && !m.reverso_de_id ? " (anulado)" : ""}`,
       m.cantidad_base != null ? Number(m.cantidad_base) : null,
-      m.tasa != null ? Number(m.tasa) : null,
+      // comisión descontada: se guarda el factor (0.96) y se muestra como -4%
+      m.comision_descontada && m.tasa != null ? `-${new Decimal(1).minus(m.tasa).times(100).toFixed()}%` : m.tasa != null ? Number(m.tasa) : null,
       Number(m.monto),
       Number(m.total),
     ]);
@@ -625,7 +641,7 @@ export async function obtenerTasasRecientes(cuentaId: number) {
   const r = await pool.query(
     `SELECT mc.tasa, mc.tasa_es_porcentaje, max(mc.id) AS ultimo, bool_or(mc.cuenta_corriente_id = $1) AS de_esta
      FROM movimientos_cuenta_corriente mc
-     WHERE mc.tasa IS NOT NULL AND NOT mc.anulado
+     WHERE mc.tasa IS NOT NULL AND NOT mc.anulado AND NOT mc.comision_descontada
        AND mc.id > (SELECT COALESCE(max(id), 0) - 3000 FROM movimientos_cuenta_corriente)
      GROUP BY mc.tasa, mc.tasa_es_porcentaje
      ORDER BY de_esta DESC, ultimo DESC`,
@@ -690,6 +706,7 @@ export async function anularMovimiento(movimientoId: number, usuarioId: number) 
     monedaBaseId: m.moneda_base_id ?? undefined,
     tasa: m.cantidad_base != null && m.tasa != null ? new Decimal(m.tasa).toString() : undefined,
     tasaEsPorcentaje: m.tasa_es_porcentaje,
+    comisionDescontada: m.comision_descontada,
     descripcion: `Reverso de: ${m.descripcion ?? m.tipo}`,
     fecha: new Date(m.fecha).toISOString(),
     usuarioId,

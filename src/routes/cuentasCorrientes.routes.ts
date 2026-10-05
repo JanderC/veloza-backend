@@ -327,6 +327,7 @@ const movimientoSchema = z.object({
   monedaBaseId: z.number().int().optional(),
   tasa: z.string().optional(),
   tasaEsPorcentaje: z.boolean().optional(),
+  comisionDescontada: z.boolean().optional(),
   cuentaDestino: z.string().max(120).optional(),
   transaccionId: z.number().int().optional(),
   fecha: z.string().optional(),

@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import {
   actualizarCanal,
   anularMovimiento,
+  avisarClientePorWhatsApp,
   buscarMovimientoPorNumero,
   cambiarEstadoCuentaCorriente,
   cambiarModuloCuentaCorriente,
@@ -98,7 +99,7 @@ cuentasCorrientesRouter.get("/", requireAuth, async (req, res, next) => {
         canalId: entero(req.query.canalId),
         buscar: typeof req.query.buscar === "string" ? req.query.buscar : undefined,
         tipoTercero: tipo,
-        vista: req.query.vista === "corrientes" || req.query.vista === "cobrar" ? req.query.vista : undefined,
+        vista: req.query.vista === "corrientes" || req.query.vista === "cobrar" || req.query.vista === "cajas" ? req.query.vista : undefined,
       })
     );
   } catch (err) {
@@ -121,7 +122,8 @@ const crearCuentaSchema = z
     canalId: z.number().int().optional(), // sin banco: no es obligatorio
     monedaId: z.number().int(),
     saldoInicial: z.string().optional(),
-    modulo: z.enum(["CORRIENTE", "POR_COBRAR"]).optional(),
+    modulo: z.enum(["CORRIENTE", "POR_COBRAR", "CAJA"]).optional(),
+    referencia: z.string().max(200).optional(),
     monedaCobroId: z.number().int().optional(),
     tasaCobro: z.string().optional(),
   })
@@ -156,7 +158,7 @@ cuentasCorrientesRouter.put("/:id/modulo", requireAuth, requireRole("ADMIN", "AS
   try {
     const id = entero(req.params.id);
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
-    const { modulo } = z.object({ modulo: z.enum(["CORRIENTE", "POR_COBRAR"]) }).parse(req.body);
+    const { modulo } = z.object({ modulo: z.enum(["CORRIENTE", "POR_COBRAR", "CAJA"]) }).parse(req.body);
     res.json(await cambiarModuloCuentaCorriente(id, modulo));
   } catch (err) {
     next(err);
@@ -227,6 +229,19 @@ cuentasCorrientesRouter.delete("/:id", requireAuth, requireRole("ADMIN", "ASESOR
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     await eliminarCuentaCorriente(id);
     res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Confirmación al cliente por el WhatsApp conectado al sistema (ej. "he recibido tanto")
+cuentasCorrientesRouter.post("/:id/avisar", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const { texto } = z.object({ texto: z.string().trim().min(1).max(2000) }).parse(req.body);
+    await avisarClientePorWhatsApp(id, texto, req.user!.id);
+    res.status(201).json({ ok: true });
   } catch (err) {
     next(err);
   }

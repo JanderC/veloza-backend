@@ -3,6 +3,9 @@ import Decimal from "decimal.js";
 import * as XLSX from "xlsx";
 import { pool } from "../db/pool";
 import { exigirTurnoAbierto } from "./cierreCaja.service";
+import { enviarMensaje } from "./whatsapp/envio";
+import { asegurarChat } from "./whatsapp/mensajes";
+import { jidDeTelefono } from "./whatsapp/transporte";
 
 interface RegistrarMovimientoCCInput {
   terceroId: number;
@@ -218,7 +221,8 @@ interface CrearCuentaInput {
   // Si se le cobra en otra moneda que la de la contabilidad (ej. cuenta en USD, se cobra en COP): cuál y a qué tasa manual
   monedaCobroId?: number;
   tasaCobro?: string;
-  modulo?: ModuloCuenta; // dónde se lleva: Cuentas Corrientes (por defecto) o Cuentas por Cobrar
+  modulo?: ModuloCuenta; // dónde se lleva: Cuentas Corrientes (por defecto), Cuentas por Cobrar o Cajas y Confirmaciones
+  referencia?: string; // dato libre del cliente (Cajas y Confirmaciones)
   monedaId: number;
   // con signo, como el "Saldo pendiente" con el que arranca la hoja del Excel: + me debe, - yo le debo
   saldoInicial?: string;
@@ -226,7 +230,7 @@ interface CrearCuentaInput {
 }
 
 export const CANAL_SIN_BANCO = "SIN_BANCO";
-export type ModuloCuenta = "CORRIENTE" | "POR_COBRAR";
+export type ModuloCuenta = "CORRIENTE" | "POR_COBRAR" | "CAJA";
 
 /** Cobrar en la misma moneda de la contabilidad no necesita tasa; en otra, la tasa manual es obligatoria. */
 function validarCobro(monedaId: number, monedaCobroId: number | null, tasaCobro?: string) {
@@ -278,8 +282,8 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
   }
 
   const cuenta = await pool.query(
-    `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual, modulo, moneda_cobro_id, tasa_cobro) VALUES ($1, $2, $3, 0, $4, $5, $6) RETURNING id`,
-    [terceroId, canalId, input.monedaId, input.modulo ?? "CORRIENTE", cobro.monedaCobroId, cobro.tasaCobro]
+    `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual, modulo, moneda_cobro_id, tasa_cobro, referencia) VALUES ($1, $2, $3, 0, $4, $5, $6, $7) RETURNING id`,
+    [terceroId, canalId, input.monedaId, input.modulo ?? "CORRIENTE", cobro.monedaCobroId, cobro.tasaCobro, input.referencia?.trim() || null]
   );
   if (saldoInicial && !saldoInicial.isZero()) {
     await registrarMovimientoCuentaCorriente({
@@ -360,6 +364,25 @@ export async function obtenerCuentaCorriente(id: number) {
   return (await conValorMoneda([r.rows[0]]))[0];
 }
 
+/** Teléfono con código de país para WhatsApp: celular colombiano o venezolano sin él -> se le agrega. */
+function telefonoConPais(telefono: string | null) {
+  const d = (telefono ?? "").replace(/\D/g, "").replace(/^00/, "");
+  if (d.length < 8) return null;
+  if (d.length === 10 && d.startsWith("3")) return `57${d}`;
+  if (d.length === 11 && d.startsWith("04")) return `58${d.slice(1)}`;
+  return d;
+}
+
+/** Manda un mensaje al cliente de la cuenta por el WhatsApp conectado al sistema (ej. la confirmación de un abono). */
+export async function avisarClientePorWhatsApp(id: number, texto: string, usuarioId: number) {
+  const cuenta = await obtenerCuentaCorriente(id);
+  const telefono = telefonoConPais(cuenta.tercero_telefono);
+  if (!telefono) throw errorHttp("Este cliente no tiene un teléfono válido registrado", 400);
+  const jid = jidDeTelefono(telefono);
+  await asegurarChat(jid, cuenta.tercero_nombre);
+  await enviarMensaje({ jid, autor: "sistema", texto, usuarioId });
+}
+
 /** Eliminar una cuenta: deja de listarse. Los movimientos no se borran; si se vuelve a crear, reaparece como estaba. */
 export async function eliminarCuentaCorriente(id: number) {
   const r = await pool.query(`UPDATE cuentas_corrientes SET activo = false WHERE id = $1 RETURNING id`, [id]);
@@ -397,10 +420,11 @@ export async function listarCuentasCorrientes(filtros: {
   buscar?: string;
   tipoTercero?: string;
   // corrientes: las que se llevan en Cuentas Corrientes. cobrar: las pasadas a Cuentas por Cobrar + toda cuenta con saldo (me deben o yo debo)
-  vista?: "corrientes" | "cobrar";
+  vista?: "corrientes" | "cobrar" | "cajas";
 }) {
   const cond: string[] = ["cc.activo"]; // las eliminadas no se listan
   if (filtros.vista === "corrientes") cond.push(`cc.modulo = 'CORRIENTE'`);
+  if (filtros.vista === "cajas") cond.push(`cc.modulo = 'CAJA'`);
   if (filtros.vista === "cobrar") cond.push(`(cc.modulo = 'POR_COBRAR' OR cc.saldo_actual <> 0)`);
   const valores: unknown[] = [];
   if (filtros.terceroId) {

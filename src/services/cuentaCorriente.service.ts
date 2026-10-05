@@ -462,7 +462,12 @@ export async function listarCuentasCorrientes(filtros: {
     // Por nombre, por cédula o por teléfono (comparando solo los dígitos, sin espacios ni +)
     const texto = filtros.buscar.trim();
     valores.push(`%${texto}%`);
-    const porTexto = `(t.nombre ILIKE $${valores.length} OR t.identificacion ILIKE $${valores.length})`;
+    // ...o por referencia: la del cliente, o la anotada en alguno de sus movimientos (número de transferencia, MTCN, quién envió)
+    const porReferencia =
+      texto.length >= 3
+        ? ` OR cc.referencia ILIKE $${valores.length} OR EXISTS (SELECT 1 FROM movimientos_cuenta_corriente mr WHERE mr.cuenta_corriente_id = cc.id AND NOT mr.anulado AND position(' · ' in mr.descripcion) > 0 AND split_part(mr.descripcion, ' · ', 2) ILIKE $${valores.length})`
+        : "";
+    const porTexto = `(t.nombre ILIKE $${valores.length} OR t.identificacion ILIKE $${valores.length}${porReferencia})`;
     const digitos = texto.replace(/\D/g, "");
     if (digitos.length >= 3) {
       valores.push(`%${digitos}%`);
@@ -472,7 +477,21 @@ export async function listarCuentasCorrientes(filtros: {
     }
   }
   const r = await pool.query(`${SELECT_CUENTA} ${cond.length ? `WHERE ${cond.join(" AND ")}` : ""} ORDER BY t.nombre, ch.nombre`, valores);
-  return conValorMoneda(r.rows);
+  // Si se buscó algo, a cada cuenta se le dice en qué movimiento apareció (para no confundir dos clientes con la misma referencia)
+  const buscado = filtros.buscar?.trim() ?? "";
+  let filas = r.rows;
+  if (buscado.length >= 3 && filas.length) {
+    const m = await pool.query(
+      `SELECT DISTINCT ON (cuenta_corriente_id) cuenta_corriente_id, descripcion, fecha, monto
+       FROM movimientos_cuenta_corriente
+       WHERE NOT anulado AND position(' · ' in descripcion) > 0 AND split_part(descripcion, ' · ', 2) ILIKE $1 AND cuenta_corriente_id = ANY($2::int[])
+       ORDER BY cuenta_corriente_id, id DESC`,
+      [`%${buscado}%`, filas.map((f) => f.id)]
+    );
+    const porCuenta = new Map(m.rows.map((x) => [x.cuenta_corriente_id, { descripcion: x.descripcion, fecha: x.fecha, monto: x.monto }]));
+    filas = filas.map((f) => ({ ...f, movimiento_coincide: porCuenta.get(f.id) ?? null }));
+  }
+  return conValorMoneda(filas);
 }
 
 export async function crearCanal(nombre: string) {

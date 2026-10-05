@@ -316,7 +316,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
 
 // ---------- Ingresos y egresos de ventanilla ----------
 const SELECT_OPERACION = `
-  SELECT o.id, o.tipo, o.cantidad, o.tasa, o.comision_pct, o.total, o.descripcion, o.cliente_nombre, o.cliente_telefono, o.cliente_cedula,
+  SELECT o.id, o.tipo, o.cantidad, o.tasa, o.comision_pct, o.divide, o.moneda_operacion, o.medio, o.total, o.descripcion, o.cliente_nombre, o.cliente_telefono, o.cliente_cedula,
          o.estado, o.created_at, o.confirmado_en, m.codigo AS moneda_codigo, u.nombre AS usuario_nombre, uc.nombre AS confirmado_por_nombre
   FROM operaciones_taquilla o
   JOIN monedas m ON m.id = o.moneda_id
@@ -337,8 +337,11 @@ interface OperacionInput {
   tipo: "INGRESO" | "EGRESO";
   monedaCodigo: string; // en qué entra o sale de la caja: COP, USD o EUR
   cantidad: string; // lo que se compró o vendió (ej. 100.000 bolívares)
-  tasa?: string; // cantidad x tasa = total
+  monedaOperacion?: string; // qué se compró o vendió: VES, USD, USDT, EUR, COP
+  tasa?: string; // cantidad x tasa = total (o cantidad ÷ tasa si dividir)
+  dividir?: boolean;
   comisionPct?: string; // % que se descuenta del total
+  medio?: "EFECTIVO" | "BANCOLOMBIA"; // por Bancolombia es transferencia: no mueve la caja
   descripcion?: string;
   clienteNombre?: string;
   clienteTelefono?: string;
@@ -362,26 +365,29 @@ export async function crearOperacionTaquilla(input: OperacionInput) {
   if (tasa && tasa.isZero()) throw errorHttp("La tasa no puede ser cero", 400);
   const comision = input.comisionPct?.trim() ? aDecimal(input.comisionPct, "La comisión") : null;
   if (comision && comision.gte(100)) throw errorHttp("La comisión tiene que ser menor al 100%", 400);
-  const total = cantidad
-    .times(tasa ?? 1)
+  if (input.dividir && !tasa) throw errorHttp("Para dividir hace falta la tasa", 400);
+  const total = (input.dividir && tasa ? cantidad.div(tasa) : cantidad.times(tasa ?? 1))
     .times(new Decimal(1).minus((comision ?? new Decimal(0)).div(100)))
     .toDecimalPlaces(Number(moneda.decimales), Decimal.ROUND_HALF_UP);
   if (!total.isPositive()) throw errorHttp("El total da cero: revisá el monto, la tasa y la comisión", 400);
 
-  // El egreso sale de la caja ya; el ingreso, solo si viene confirmado
+  // El egreso queda hecho ya; el ingreso, solo si viene confirmado. Por Bancolombia es transferencia: nunca mueve la caja
   const aplica = input.tipo === "EGRESO" || !!input.confirmada;
+  const medio = input.medio ?? "EFECTIVO";
+  const tocaCaja = medio === "EFECTIVO";
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    if (aplica) await aplicarACaja(client, caja.id, moneda.id, input.tipo === "INGRESO" ? total : total.negated(), input.usuarioId);
+    if (aplica && tocaCaja) await aplicarACaja(client, caja.id, moneda.id, input.tipo === "INGRESO" ? total : total.negated(), input.usuarioId);
     await client.query(
       `INSERT INTO operaciones_taquilla
-        (tipo, moneda_id, cantidad, tasa, comision_pct, total, descripcion, cliente_nombre, cliente_telefono, cliente_cedula, estado, usuario_id, confirmado_en, confirmado_por)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $13 THEN now() END, CASE WHEN $13 THEN $12::int END)`,
+        (tipo, moneda_id, cantidad, tasa, comision_pct, total, descripcion, cliente_nombre, cliente_telefono, cliente_cedula, estado, usuario_id, confirmado_en, confirmado_por, moneda_operacion, divide, medio)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $13 THEN now() END, CASE WHEN $13 THEN $12::int END, $14, $15, $16)`,
       [
         input.tipo, moneda.id, cantidad.toFixed(4), tasa?.toFixed(8) ?? null, comision?.toFixed(4) ?? null, total.toFixed(4),
         input.descripcion?.trim() || null, input.clienteNombre?.trim() || null, input.clienteTelefono?.trim() || null, input.clienteCedula?.trim() || null,
         aplica ? "CONFIRMADA" : "PENDIENTE", input.usuarioId, aplica,
+        input.monedaOperacion?.trim().toUpperCase() || null, !!(input.dividir && tasa), medio,
       ]
     );
     await client.query("COMMIT");
@@ -404,7 +410,8 @@ export async function confirmarOperacionTaquilla(id: number, usuarioId: number) 
     const o = r.rows[0];
     if (!o) throw errorHttp("Operación no encontrada", 404);
     if (o.estado !== "PENDIENTE") throw errorHttp("Esa operación ya no está pendiente", 409);
-    await aplicarACaja(client, caja.id, o.moneda_id, o.tipo === "INGRESO" ? new Decimal(o.total) : new Decimal(o.total).negated(), usuarioId);
+    // por Bancolombia se confirma sin tocar la caja
+    if (o.medio === "EFECTIVO") await aplicarACaja(client, caja.id, o.moneda_id, o.tipo === "INGRESO" ? new Decimal(o.total) : new Decimal(o.total).negated(), usuarioId);
     await client.query(`UPDATE operaciones_taquilla SET estado = 'CONFIRMADA', confirmado_en = now(), confirmado_por = $2 WHERE id = $1`, [id, usuarioId]);
     await client.query("COMMIT");
   } catch (err) {

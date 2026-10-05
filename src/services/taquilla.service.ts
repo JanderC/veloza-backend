@@ -341,8 +341,11 @@ interface OperacionInput {
   dividir?: boolean;
   comisionPct?: string; // % que se descuenta
   monedaResultado: string; // en qué queda el resultado
-  // qué lado mueve la caja: lo que trae el cliente (MONTO) o lo que sale de la cuenta (RESULTADO)
-  cajaLado: "MONTO" | "RESULTADO";
+  // qué lado mueve la caja: lo que trae el cliente (MONTO), lo que sale de la cuenta (RESULTADO),
+  // o los dos (AMBOS: efectivo por efectivo; en un ingreso entra el monto y sale el resultado)
+  cajaLado: "MONTO" | "RESULTADO" | "AMBOS";
+  // el resultado ya calculado, cuando la cuenta no es una sola tasa (ej. dólares por denominación de billete)
+  resultado?: string;
   medio?: "EFECTIVO" | "BANCOLOMBIA"; // por Bancolombia es transferencia: no mueve la caja
   descripcion?: string;
   clienteNombre?: string;
@@ -377,27 +380,41 @@ export async function crearOperacionTaquilla(input: OperacionInput) {
   const monedaOperacion = monedaDe(codigoOperacion);
   if (!monedaResultado || !monedaOperacion) throw errorHttp("Moneda no encontrada", 400);
 
-  const resultado = (input.dividir && tasa ? cantidad.div(tasa) : cantidad.times(tasa ?? 1))
-    .times(new Decimal(1).minus((comision ?? new Decimal(0)).div(100)))
-    .toDecimalPlaces(Number(monedaResultado.decimales), Decimal.ROUND_HALF_UP);
+  const resultado = (
+    input.resultado?.trim()
+      ? aDecimal(input.resultado, "El resultado")
+      : (input.dividir && tasa ? cantidad.div(tasa) : cantidad.times(tasa ?? 1)).times(new Decimal(1).minus((comision ?? new Decimal(0)).div(100)))
+  ).toDecimalPlaces(Number(monedaResultado.decimales), Decimal.ROUND_HALF_UP);
   if (!resultado.isPositive()) throw errorHttp("El resultado da cero: revisá el monto y la tasa o la comisión", 400);
 
-  // Lo que mueve la caja: lo que trae el cliente o lo que resulta
-  const monedaCaja = input.cajaLado === "MONTO" ? monedaOperacion : monedaResultado;
-  const total = input.cajaLado === "MONTO" ? cantidad.toDecimalPlaces(Number(monedaOperacion.decimales), Decimal.ROUND_HALF_UP) : resultado;
+  // Lo que mueve la caja. El total guardado es el lado del monto (o del resultado si solo ese la mueve)
+  const montoRedondeado = cantidad.toDecimalPlaces(Number(monedaOperacion.decimales), Decimal.ROUND_HALF_UP);
+  const monedaCaja = input.cajaLado === "RESULTADO" ? monedaResultado : monedaOperacion;
+  const total = input.cajaLado === "RESULTADO" ? resultado : montoRedondeado;
+  // con signo, por moneda: en un ingreso entra el monto y (si son los dos lados) sale el resultado; en un egreso, al revés
+  const signo = input.tipo === "INGRESO" ? 1 : -1;
+  const efectos: { moneda: typeof monedaCaja; delta: Decimal }[] =
+    input.cajaLado === "AMBOS"
+      ? [
+          { moneda: monedaOperacion, delta: montoRedondeado.times(signo) },
+          { moneda: monedaResultado, delta: resultado.times(-signo) },
+        ]
+      : [{ moneda: monedaCaja, delta: total.times(signo) }];
 
   // El egreso queda hecho ya; el ingreso, solo si viene confirmado. Por Bancolombia es transferencia: nunca mueve la caja
   const aplica = input.tipo === "EGRESO" || !!input.confirmada;
   const medio = input.medio ?? "EFECTIVO";
   const tocaCaja = medio === "EFECTIVO";
-  if (tocaCaja && !(MONEDAS_TAQUILLA as readonly string[]).includes(monedaCaja.codigo)) {
-    throw errorHttp(`La caja de taquilla solo maneja pesos, dólares y euros: no puede moverse en ${monedaCaja.codigo}`, 400);
-  }
+  const fuera = tocaCaja ? efectos.find((e) => !(MONEDAS_TAQUILLA as readonly string[]).includes(e.moneda.codigo)) : undefined;
+  if (fuera) throw errorHttp(`La caja de taquilla solo maneja pesos, dólares y euros: no puede moverse en ${fuera.moneda.codigo}`, 400);
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    if (aplica && tocaCaja) await aplicarACaja(client, caja.id, monedaCaja.id, input.tipo === "INGRESO" ? total : total.negated(), input.usuarioId);
+    if (aplica && tocaCaja) {
+      // primero lo que entra, después lo que sale
+      for (const e of [...efectos].sort((a, b) => b.delta.cmp(a.delta))) await aplicarACaja(client, caja.id, e.moneda.id, e.delta, input.usuarioId);
+    }
     await client.query(
       `INSERT INTO operaciones_taquilla
         (tipo, moneda_id, cantidad, tasa, comision_pct, total, descripcion, cliente_nombre, cliente_telefono, cliente_cedula, estado, usuario_id,
@@ -431,7 +448,21 @@ export async function confirmarOperacionTaquilla(id: number, usuarioId: number) 
     if (!o) throw errorHttp("Operación no encontrada", 404);
     if (o.estado !== "PENDIENTE") throw errorHttp("Esa operación ya no está pendiente", 409);
     // por Bancolombia se confirma sin tocar la caja
-    if (o.medio === "EFECTIVO") await aplicarACaja(client, caja.id, o.moneda_id, o.tipo === "INGRESO" ? new Decimal(o.total) : new Decimal(o.total).negated(), usuarioId);
+    if (o.medio === "EFECTIVO") {
+      const signo = o.tipo === "INGRESO" ? 1 : -1;
+      if (o.caja_lado === "AMBOS") {
+        // efectivo por efectivo: entra un lado y sale el otro
+        const m = await client.query(`SELECT id, codigo FROM monedas WHERE codigo = ANY($1::text[])`, [[o.moneda_operacion, o.moneda_resultado]]);
+        const idDe = (codigo: string) => m.rows.find((x) => x.codigo === codigo)?.id as number;
+        const efectos = [
+          { monedaId: idDe(o.moneda_operacion), delta: new Decimal(o.cantidad).times(signo) },
+          { monedaId: idDe(o.moneda_resultado), delta: new Decimal(o.resultado).times(-signo) },
+        ].sort((a, b) => b.delta.cmp(a.delta));
+        for (const e of efectos) await aplicarACaja(client, caja.id, e.monedaId, e.delta, usuarioId);
+      } else {
+        await aplicarACaja(client, caja.id, o.moneda_id, new Decimal(o.total).times(signo), usuarioId);
+      }
+    }
     await client.query(`UPDATE operaciones_taquilla SET estado = 'CONFIRMADA', confirmado_en = now(), confirmado_por = $2 WHERE id = $1`, [id, usuarioId]);
     await client.query("COMMIT");
   } catch (err) {

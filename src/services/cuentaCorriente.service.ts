@@ -36,8 +36,8 @@ interface RegistrarMovimientoCCInput {
   cuentaDestino?: string; // a qué cuenta del cliente se le pagó (opcional)
   // Comisión descontada del monto: la tasa viaja como factor (4% -> "0.96") y cantidad × factor = lo que queda
   comisionDescontada?: boolean;
-  // Western Union tarda en verificar: el movimiento nace "en proceso de confirmación"
-  estadoConfirmacion?: "EN_PROCESO";
+  // Confirmación de la transferencia: entra ya confirmada, o pendiente hasta que se verifique (ej. Western Union)
+  estadoConfirmacion?: "EN_PROCESO" | "CONFIRMADA";
 }
 
 function errorHttp(mensaje: string, status: number) {

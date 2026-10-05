@@ -6,6 +6,7 @@ import { abrirTurnoSiFalta } from "./cierreCaja.service";
 import { enviarMensaje } from "./whatsapp/envio";
 import { asegurarChat } from "./whatsapp/mensajes";
 import { jidDeTelefono } from "./whatsapp/transporte";
+import { generarUrlTemporal, subirArchivo } from "./almacenamiento.service";
 
 interface RegistrarMovimientoCCInput {
   terceroId: number;
@@ -538,7 +539,7 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
        SELECT mc.*, sum(mc.monto) OVER (ORDER BY mc.fecha, mc.id) AS total
        FROM movimientos_cuenta_corriente mc WHERE mc.cuenta_corriente_id = $1
      )
-     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.comision_descontada, c.estado_confirmacion, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
+     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.comision_descontada, c.estado_confirmacion, (c.comprobante_key IS NOT NULL) AS tiene_comprobante, c.pagado_en, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
             c.movimiento_caja_id, c.created_at, u.nombre AS usuario_nombre, mb.codigo AS moneda_base_codigo, cat.nombre AS categoria_nombre
      FROM corridos c
      JOIN usuarios u ON u.id = c.usuario_id
@@ -702,6 +703,22 @@ export async function guardarTasaHabitual(id: number, tasa: string) {
   const r = await pool.query(`UPDATE cuentas_corrientes SET tasa_habitual = $1 WHERE id = $2 RETURNING id`, [valor.toFixed(8), id]);
   if (!r.rows[0]) throw errorHttp("Cuenta corriente no encontrada", 404);
   return { tasaHabitual: valor.toFixed() };
+}
+
+/** Guarda la imagen del comprobante con el movimiento (se ve después en la hoja del cliente y en Taquilla). */
+export async function guardarComprobanteMovimiento(movimientoId: number, imagen: Buffer, mime: string) {
+  const existe = await pool.query(`SELECT id FROM movimientos_cuenta_corriente WHERE id = $1`, [movimientoId]);
+  if (!existe.rows[0]) throw errorHttp("Movimiento no encontrado", 404);
+  const key = await subirArchivo("comprobantes-movimientos", `mov-${movimientoId}-${Date.now()}`, imagen, mime);
+  await pool.query(`UPDATE movimientos_cuenta_corriente SET comprobante_key = $1, comprobante_mime = $2 WHERE id = $3`, [key, mime, movimientoId]);
+  return { ok: true };
+}
+
+/** Enlace temporal (unos minutos) para ver la imagen del comprobante de un movimiento. */
+export async function urlComprobanteMovimiento(movimientoId: number) {
+  const r = await pool.query(`SELECT comprobante_key, comprobante_mime FROM movimientos_cuenta_corriente WHERE id = $1`, [movimientoId]);
+  if (!r.rows[0]?.comprobante_key) throw errorHttp("Ese movimiento no tiene imagen de comprobante", 404);
+  return { url: generarUrlTemporal(r.rows[0].comprobante_key, r.rows[0].comprobante_mime, 600) };
 }
 
 /** Western (u otro medio que tarda) ya verificó: el movimiento en proceso pasa a confirmado. */

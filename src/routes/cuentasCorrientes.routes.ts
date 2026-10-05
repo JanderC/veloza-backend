@@ -17,11 +17,13 @@ import {
   crearCuentaCorriente,
   eliminarCuentaCorriente,
   generarExcelEstadoCuenta,
+  guardarComprobanteMovimiento,
   guardarTasaHabitual,
   listarCuentasCorrientes,
   obtenerEstadoCuenta,
   obtenerTasasRecientes,
   registrarMovimientoCuentaCorriente,
+  urlComprobanteMovimiento,
 } from "../services/cuentaCorriente.service";
 import { importarSaldosIniciales, ResultadoFila } from "../services/importacionSaldos.service";
 import { leerComprobante } from "../services/lecturaComprobante.service";
@@ -209,6 +211,35 @@ cuentasCorrientesRouter.put("/:id/tasa-habitual", requireAuth, requireRole("ADMI
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     const { tasa } = z.object({ tasa: z.string() }).parse(req.body);
     res.json(await guardarTasaHabitual(id, tasa));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// La imagen del comprobante de un movimiento: guardarla y verla
+cuentasCorrientesRouter.post(
+  "/movimientos/:id/comprobante",
+  requireAuth,
+  requireRole("ADMIN", "ASESOR", "CAJERO"),
+  upload.single("imagen"),
+  async (req, res, next) => {
+    try {
+      const id = entero(req.params.id);
+      if (id === undefined) return res.status(400).json({ error: "id inválido" });
+      if (!req.file) return res.status(400).json({ error: "Adjuntá la imagen del comprobante" });
+      if (!/^image\/(jpeg|png|webp|gif)$/.test(req.file.mimetype)) return res.status(400).json({ error: "El comprobante tiene que ser una imagen (JPG, PNG o WebP)" });
+      res.status(201).json(await guardarComprobanteMovimiento(id, req.file.buffer, req.file.mimetype));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+cuentasCorrientesRouter.get("/movimientos/:id/comprobante", requireAuth, async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    res.json(await urlComprobanteMovimiento(id));
   } catch (err) {
     next(err);
   }

@@ -1,14 +1,25 @@
+import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
-import { abrirTurnoSiFalta } from "./cierreCaja.service";
 import { registrarMovimientoCuentaCorriente } from "./cuentaCorriente.service";
 
 const ZONA = "America/Bogota";
-// Lo que se ve de la caja de taquilla: efectivo en pesos, dólares y euros
-const MONEDAS_TAQUILLA = ["COP", "USD", "EUR"];
+// Lo que maneja la caja de taquilla: efectivo en pesos, dólares y euros
+const MONEDAS_TAQUILLA = ["COP", "USD", "EUR"] as const;
+type CodigoMoneda = (typeof MONEDAS_TAQUILLA)[number];
 
 function errorHttp(mensaje: string, status: number) {
   return Object.assign(new Error(mensaje), { status });
+}
+
+function aDecimal(valor: string | undefined, campo: string) {
+  try {
+    const d = new Decimal(valor ?? "0");
+    if (!d.isFinite() || d.isNegative()) throw new Error();
+    return d;
+  } catch {
+    throw errorHttp(`${campo} no es un monto válido`, 400);
+  }
 }
 
 async function cajaDeTaquilla() {
@@ -17,42 +28,188 @@ async function cajaDeTaquilla() {
   return r.rows[0] as { id: number; nombre: string };
 }
 
-// Solicitudes de Confirmaciones: lo que se le compró al cliente y ya está confirmado
+/** Las monedas de taquilla con su id, en el orden en que se muestran. */
+async function monedasDeTaquilla(db: { query: PoolClient["query"] } = pool) {
+  const r = await db.query(
+    `SELECT id, codigo, decimales FROM monedas WHERE codigo = ANY($1::text[]) ORDER BY array_position($1::text[], codigo::text)`,
+    [MONEDAS_TAQUILLA as unknown as string[]]
+  );
+  return r.rows as { id: number; codigo: CodigoMoneda; decimales: number }[];
+}
+
+// Todas las compras de Confirmaciones: lo que hay que entregarle al cliente en efectivo.
+// Las que Western todavía no confirmó también llegan, marcadas, y no se pueden pagar hasta que se confirmen.
 const SELECT_SOLICITUD = `
-  SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, mc.cantidad_base, mc.tasa, mc.comision_descontada,
-         mc.pagado_en, up.nombre AS pagado_por_nombre,
-         cc.id AS cuenta_id, m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,
+  SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, mc.cantidad_base, mc.tasa, mc.comision_descontada, mc.cuenta_destino,
+         mc.estado_confirmacion, (mc.comprobante_key IS NOT NULL) AS tiene_comprobante,
+         mc.pagado_en, up.nombre AS pagado_por_nombre, ur.nombre AS registrado_por_nombre,
+         cc.id AS cuenta_id, cc.referencia AS cliente_referencia, m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,
+         ch.nombre AS canal_nombre,
          t.nombre AS cliente_nombre, t.telefono AS cliente_telefono, t.identificacion AS cliente_cedula
   FROM movimientos_cuenta_corriente mc
   JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
   JOIN monedas m ON m.id = cc.moneda_id
+  JOIN canales_cuenta_corriente ch ON ch.id = cc.canal_id
   JOIN terceros t ON t.id = cc.tercero_id
+  JOIN usuarios ur ON ur.id = mc.usuario_id
   LEFT JOIN usuarios up ON up.id = mc.pagado_por
-  WHERE cc.modulo = 'CAJA' AND mc.estado_confirmacion = 'CONFIRMADA' AND NOT mc.anulado AND mc.monto > 0`;
+  WHERE cc.modulo = 'CAJA' AND NOT mc.anulado AND mc.monto > 0 AND mc.reverso_de_id IS NULL`;
 
-/** La caja de taquilla con su efectivo, las solicitudes confirmadas por pagar y las pagadas hoy. */
+/**
+ * La taquilla: su caja con la sesión del día (con cuánto abrió, cuánto entró y salió, cuánto debe haber),
+ * las solicitudes por pagar, las pagadas y el último cuadre.
+ */
 export async function obtenerTaquilla() {
   const caja = await cajaDeTaquilla();
-  const saldos = await pool.query(
-    `SELECT m.id AS moneda_id, m.codigo, m.decimales, COALESCE(s.monto, 0) AS monto
-     FROM monedas m LEFT JOIN saldos_caja s ON s.moneda_id = m.id AND s.caja_id = $1
-     WHERE m.codigo = ANY($2::text[])
+  const monedas = await monedasDeTaquilla();
+  const turnos = await pool.query(
+    `SELECT cz.id, cz.moneda_id, cz.fecha_apertura, cz.saldo_inicial, u.nombre AS usuario_nombre
+     FROM cierres_caja cz JOIN usuarios u ON u.id = cz.usuario_id
+     WHERE cz.caja_id = $1 AND cz.estado = 'ABIERTA'`,
+    [caja.id]
+  );
+  const saldos = await pool.query(`SELECT moneda_id, monto FROM saldos_caja WHERE caja_id = $1`, [caja.id]);
+  const abierta = turnos.rows.length > 0;
+  const abiertaEn: Date | null = abierta ? turnos.rows.reduce((min: Date, t) => (t.fecha_apertura < min ? t.fecha_apertura : min), turnos.rows[0].fecha_apertura) : null;
+
+  // Lo que entró y salió de la caja desde que abrió (el ajuste de apertura no cuenta: es el saldo inicial)
+  const movidos = abierta
+    ? await pool.query(
+        `SELECT moneda_id, tipo, COALESCE(sum(monto), 0) AS total FROM movimientos_caja
+         WHERE caja_id = $1 AND created_at > $2 GROUP BY moneda_id, tipo`,
+        [caja.id, abiertaEn]
+      )
+    : { rows: [] as { moneda_id: number; tipo: string; total: string }[] };
+
+  const porMoneda = monedas.map((m) => {
+    const turno = turnos.rows.find((t) => t.moneda_id === m.id);
+    const total = (tipo: string) => new Decimal(movidos.rows.find((x) => x.moneda_id === m.id && x.tipo === tipo)?.total ?? 0).toFixed(4);
+    return {
+      moneda_id: m.id,
+      codigo: m.codigo,
+      decimales: m.decimales,
+      monto: new Decimal(saldos.rows.find((s) => s.moneda_id === m.id)?.monto ?? 0).toFixed(4), // lo que debe haber en caja
+      inicial: turno ? new Decimal(turno.saldo_inicial).toFixed(4) : null,
+      entradas: total("INGRESO"),
+      salidas: total("EGRESO"),
+    };
+  });
+
+  // El último cuadre: lo que debía haber, lo que se contó y la diferencia, por moneda
+  const ultimo = await pool.query(
+    `SELECT cz.fecha_apertura, cz.fecha_cierre, cz.saldo_inicial, cz.saldo_esperado, cz.saldo_real, cz.diferencia, m.codigo, u.nombre AS usuario_nombre
+     FROM cierres_caja cz JOIN monedas m ON m.id = cz.moneda_id JOIN usuarios u ON u.id = cz.usuario_id
+     WHERE cz.caja_id = $1 AND cz.estado = 'CERRADA'
+       AND cz.fecha_cierre = (SELECT max(fecha_cierre) FROM cierres_caja WHERE caja_id = $1 AND estado = 'CERRADA')
      ORDER BY array_position($2::text[], m.codigo::text)`,
-    [caja.id, MONEDAS_TAQUILLA]
+    [caja.id, MONEDAS_TAQUILLA as unknown as string[]]
   );
+
   const pendientes = await pool.query(`${SELECT_SOLICITUD} AND mc.pagado_en IS NULL ORDER BY mc.fecha, mc.id`);
-  const pagadasHoy = await pool.query(
-    `${SELECT_SOLICITUD} AND (mc.pagado_en AT TIME ZONE '${ZONA}')::date = (now() AT TIME ZONE '${ZONA}')::date ORDER BY mc.pagado_en DESC`
-  );
-  return { caja: { ...caja, saldos: saldos.rows }, pendientes: pendientes.rows, pagadasHoy: pagadasHoy.rows };
+  // Pagadas: las de esta sesión de caja; con la caja cerrada, las de hoy
+  const pagadas = abierta
+    ? await pool.query(`${SELECT_SOLICITUD} AND mc.pagado_en >= $1 ORDER BY mc.pagado_en DESC`, [abiertaEn])
+    : await pool.query(`${SELECT_SOLICITUD} AND (mc.pagado_en AT TIME ZONE '${ZONA}')::date = (now() AT TIME ZONE '${ZONA}')::date ORDER BY mc.pagado_en DESC`);
+
+  return {
+    caja: { ...caja, saldos: porMoneda },
+    sesion: { abierta, abierta_en: abiertaEn, abierta_por: abierta ? (turnos.rows[0].usuario_nombre as string) : null },
+    ultimoCierre: ultimo.rows.length
+      ? { cerrada_en: ultimo.rows[0].fecha_cierre, abierta_en: ultimo.rows[0].fecha_apertura, por: ultimo.rows[0].usuario_nombre, monedas: ultimo.rows }
+      : null,
+    pendientes: pendientes.rows,
+    pagadasHoy: pagadas.rows,
+  };
+}
+
+/** Deja el saldo de la caja en `nuevo` y anota el movimiento por la diferencia. */
+async function fijarSaldo(client: PoolClient, cajaId: number, monedaId: number, nuevo: Decimal, usuarioId: number) {
+  const saldo = await client.query(`SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`, [cajaId, monedaId]);
+  const anterior = new Decimal(saldo.rows[0]?.monto ?? 0);
+  if (saldo.rows[0]) await client.query(`UPDATE saldos_caja SET monto = $1 WHERE id = $2`, [nuevo.toFixed(4), saldo.rows[0].id]);
+  else await client.query(`INSERT INTO saldos_caja (caja_id, moneda_id, monto) VALUES ($1, $2, $3)`, [cajaId, monedaId, nuevo.toFixed(4)]);
+  const diferencia = nuevo.minus(anterior);
+  if (!diferencia.isZero()) {
+    await client.query(
+      `INSERT INTO movimientos_caja (caja_id, moneda_id, tipo, monto, saldo_anterior, saldo_nuevo, usuario_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [cajaId, monedaId, diferencia.isPositive() ? "INGRESO" : "EGRESO", diferencia.abs().toFixed(4), anterior.toFixed(4), nuevo.toFixed(4), usuarioId]
+    );
+  }
 }
 
 /**
- * Sumar o descontar efectivo de la caja de taquilla (iniciar el día, reponer, retirar).
+ * Abrir la caja de taquilla: se declara con cuánto efectivo arranca en pesos, dólares y euros.
+ * La caja queda en esos montos y desde ahí se va sumando y descontando todo hasta el cuadre.
+ */
+export async function abrirSesionTaquilla(input: { montos: Partial<Record<CodigoMoneda, string>>; usuarioId: number }) {
+  const caja = await cajaDeTaquilla();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const abierta = await client.query(`SELECT 1 FROM cierres_caja WHERE caja_id = $1 AND estado = 'ABIERTA' LIMIT 1`, [caja.id]);
+    if (abierta.rows.length) throw errorHttp("La caja de taquilla ya está abierta", 409);
+    for (const m of await monedasDeTaquilla(client)) {
+      const inicial = aDecimal(input.montos[m.codigo], `El monto inicial en ${m.codigo}`);
+      await fijarSaldo(client, caja.id, m.id, inicial, input.usuarioId);
+      await client.query(
+        `INSERT INTO cierres_caja (caja_id, moneda_id, usuario_id, fecha_apertura, saldo_inicial, estado) VALUES ($1, $2, $3, now(), $4, 'ABIERTA')`,
+        [caja.id, m.id, input.usuarioId, inicial.toFixed(4)]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+  return obtenerTaquilla();
+}
+
+/**
+ * Cerrar y cuadrar: se cuenta el efectivo de cada moneda y se compara con lo que debía haber.
+ * Queda guardado lo esperado, lo contado y la diferencia (contado - esperado).
+ */
+export async function cerrarSesionTaquilla(input: { contado: Partial<Record<CodigoMoneda, string>>; usuarioId: number }) {
+  const caja = await cajaDeTaquilla();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    // FOR UPDATE espera a que terminen los pagos en curso
+    const turnos = await client.query(`SELECT id, moneda_id FROM cierres_caja WHERE caja_id = $1 AND estado = 'ABIERTA' FOR UPDATE`, [caja.id]);
+    if (!turnos.rows.length) throw errorHttp("La caja de taquilla no está abierta", 409);
+    for (const m of await monedasDeTaquilla(client)) {
+      const turno = turnos.rows.find((t) => t.moneda_id === m.id);
+      if (!turno) continue;
+      const real = aDecimal(input.contado[m.codigo], `Lo contado en ${m.codigo}`);
+      const saldo = await client.query(`SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2`, [caja.id, m.id]);
+      const esperado = new Decimal(saldo.rows[0]?.monto ?? 0);
+      await client.query(
+        `UPDATE cierres_caja SET fecha_cierre = now(), saldo_esperado = $1, saldo_real = $2, diferencia = $3, estado = 'CERRADA' WHERE id = $4`,
+        [esperado.toFixed(4), real.toFixed(4), real.minus(esperado).toFixed(4), turno.id]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+  return obtenerTaquilla();
+}
+
+/** ¿Está abierta la caja de taquilla en esa moneda? */
+async function exigirSesion(cajaId: number, monedaId: number) {
+  const r = await pool.query(`SELECT 1 FROM cierres_caja WHERE caja_id = $1 AND moneda_id = $2 AND estado = 'ABIERTA'`, [cajaId, monedaId]);
+  if (!r.rows.length) throw errorHttp("Primero hay que abrir la caja de taquilla", 409);
+}
+
+/**
+ * Sumar o descontar efectivo de la caja con la sesión abierta (reponer, retirar).
  * monto con signo: + entra, - sale. No deja la caja en negativo.
  */
 export async function moverCajaTaquilla(input: { monedaCodigo: string; monto: string; usuarioId: number }) {
-  if (!MONEDAS_TAQUILLA.includes(input.monedaCodigo)) throw errorHttp("La caja de taquilla solo maneja pesos, dólares y euros", 400);
   let monto: Decimal;
   try {
     monto = new Decimal(input.monto);
@@ -62,25 +219,17 @@ export async function moverCajaTaquilla(input: { monedaCodigo: string; monto: st
   if (!monto.isFinite() || monto.isZero()) throw errorHttp("El monto no puede ser cero", 400);
 
   const caja = await cajaDeTaquilla();
+  const moneda = (await monedasDeTaquilla()).find((m) => m.codigo === input.monedaCodigo);
+  if (!moneda) throw errorHttp("La caja de taquilla solo maneja pesos, dólares y euros", 400);
+  await exigirSesion(caja.id, moneda.id);
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const moneda = await client.query(`SELECT id FROM monedas WHERE codigo = $1`, [input.monedaCodigo]);
-    if (!moneda.rows[0]) throw errorHttp("Moneda no encontrada", 404);
-    const monedaId = moneda.rows[0].id as number;
-    await abrirTurnoSiFalta(client, caja.id, monedaId, input.usuarioId);
-
-    const saldo = await client.query(`SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`, [caja.id, monedaId]);
-    const anterior = new Decimal(saldo.rows[0]?.monto ?? 0);
-    const nuevo = anterior.plus(monto);
+    const saldo = await client.query(`SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`, [caja.id, moneda.id]);
+    const nuevo = new Decimal(saldo.rows[0]?.monto ?? 0).plus(monto);
     if (nuevo.isNegative()) throw errorHttp("La caja no tiene tanto para descontar", 409);
-    if (saldo.rows[0]) await client.query(`UPDATE saldos_caja SET monto = $1 WHERE id = $2`, [nuevo.toFixed(4), saldo.rows[0].id]);
-    else await client.query(`INSERT INTO saldos_caja (caja_id, moneda_id, monto) VALUES ($1, $2, $3)`, [caja.id, monedaId, nuevo.toFixed(4)]);
-
-    await client.query(
-      `INSERT INTO movimientos_caja (caja_id, moneda_id, tipo, monto, saldo_anterior, saldo_nuevo, usuario_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [caja.id, monedaId, monto.isPositive() ? "INGRESO" : "EGRESO", monto.abs().toFixed(4), anterior.toFixed(4), nuevo.toFixed(4), input.usuarioId]
-    );
+    await fijarSaldo(client, caja.id, moneda.id, nuevo, input.usuarioId);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
@@ -93,21 +242,35 @@ export async function moverCajaTaquilla(input: { monedaCodigo: string; monto: st
 
 /**
  * "Se pagó": al cliente se le entrega su efectivo. Descuenta de la caja de taquilla y deja saldada su cuenta
- * (registra el pago en su hoja). Una solicitud no se paga dos veces.
+ * (registra el pago en su hoja). Una solicitud no se paga dos veces, ni antes de que Western la confirme.
  */
 export async function pagarSolicitud(movimientoId: number, usuarioId: number) {
   const caja = await cajaDeTaquilla();
+  const previa = await pool.query(
+    `SELECT mc.estado_confirmacion, mc.pagado_en, cc.moneda_id, m.codigo AS moneda_codigo
+     FROM movimientos_cuenta_corriente mc JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id JOIN monedas m ON m.id = cc.moneda_id
+     WHERE mc.id = $1 AND cc.modulo = 'CAJA' AND NOT mc.anulado AND mc.monto > 0`,
+    [movimientoId]
+  );
+  const p = previa.rows[0];
+  if (!p) throw errorHttp("Solicitud no encontrada", 404);
+  if (p.pagado_en) throw errorHttp("Esa solicitud ya se pagó", 409);
+  if (p.estado_confirmacion === "EN_PROCESO") throw errorHttp("Esa transferencia todavía no está confirmada: se confirma en Confirmaciones y después se paga", 409);
+  if (!(MONEDAS_TAQUILLA as readonly string[]).includes(p.moneda_codigo)) {
+    throw errorHttp(`Esa solicitud se paga en ${p.moneda_codigo} y la caja de taquilla solo maneja pesos, dólares y euros`, 409);
+  }
+  await exigirSesion(caja.id, p.moneda_id);
+
   // Se aparta primero: si dos personas tocan "Se pagó" a la vez, solo una sigue
   const apartada = await pool.query(
     `UPDATE movimientos_cuenta_corriente mc SET pagado_en = now(), pagado_por = $2
      FROM cuentas_corrientes cc
-     WHERE mc.id = $1 AND cc.id = mc.cuenta_corriente_id AND cc.modulo = 'CAJA'
-       AND mc.estado_confirmacion = 'CONFIRMADA' AND NOT mc.anulado AND mc.monto > 0 AND mc.pagado_en IS NULL
+     WHERE mc.id = $1 AND cc.id = mc.cuenta_corriente_id AND mc.pagado_en IS NULL AND NOT mc.anulado
      RETURNING mc.id, mc.monto, mc.descripcion, cc.tercero_id, cc.canal_id, cc.moneda_id`,
     [movimientoId, usuarioId]
   );
   const s = apartada.rows[0];
-  if (!s) throw errorHttp("Esa solicitud no está por pagar: ya se pagó, se anuló o todavía no está confirmada", 409);
+  if (!s) throw errorHttp("Esa solicitud ya se pagó", 409);
 
   try {
     const referencia = String(s.descripcion ?? "").split(" · ")[1];

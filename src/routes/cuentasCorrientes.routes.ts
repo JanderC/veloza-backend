@@ -12,6 +12,7 @@ import {
   cambiarModuloCuentaCorriente,
   cerrarDiaCuentaCorriente,
   configurarCobroCuenta,
+  confirmarMovimiento,
   crearCanal,
   crearCuentaCorriente,
   eliminarCuentaCorriente,
@@ -213,6 +214,17 @@ cuentasCorrientesRouter.put("/:id/tasa-habitual", requireAuth, requireRole("ADMI
   }
 });
 
+// El movimiento en proceso de confirmación (ej. Western Union) ya fue verificado
+cuentasCorrientesRouter.post("/movimientos/:id/confirmar", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    res.json(await confirmarMovimiento(id));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ¿Ya se registró un movimiento con ese número de transferencia? (para no cargarlo dos veces)
 cuentasCorrientesRouter.get("/movimientos/numero/:numero", requireAuth, async (req, res, next) => {
   try {
@@ -328,6 +340,7 @@ const movimientoSchema = z.object({
   tasa: z.string().optional(),
   tasaEsPorcentaje: z.boolean().optional(),
   comisionDescontada: z.boolean().optional(),
+  estadoConfirmacion: z.literal("EN_PROCESO").optional(),
   cuentaDestino: z.string().max(120).optional(),
   transaccionId: z.number().int().optional(),
   fecha: z.string().optional(),

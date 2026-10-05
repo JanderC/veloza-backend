@@ -36,6 +36,8 @@ interface RegistrarMovimientoCCInput {
   cuentaDestino?: string; // a qué cuenta del cliente se le pagó (opcional)
   // Comisión descontada del monto: la tasa viaja como factor (4% -> "0.96") y cantidad × factor = lo que queda
   comisionDescontada?: boolean;
+  // Western Union tarda en verificar: el movimiento nace "en proceso de confirmación"
+  estadoConfirmacion?: "EN_PROCESO";
 }
 
 function errorHttp(mensaje: string, status: number) {
@@ -114,8 +116,8 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
 
         const movResult = await client.query(
       `INSERT INTO movimientos_cuenta_corriente
-        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje, cuenta_destino, comision_descontada)
-       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15, $16, $17)
+        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje, cuenta_destino, comision_descontada, estado_confirmacion)
+       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15, $16, $17, $18)
        RETURNING *`,
       [
         cuenta.id, input.fecha ?? null, input.descripcion ?? null, input.tipo,
@@ -125,6 +127,7 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
         !!((input.tasaEsPorcentaje || input.comisionDescontada) && tasa),
         input.cuentaDestino?.trim() || null,
         !!(input.comisionDescontada && tasa),
+        input.reversoDeId ? null : (input.estadoConfirmacion ?? null),
       ]
     );
 
@@ -515,7 +518,7 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
        SELECT mc.*, sum(mc.monto) OVER (ORDER BY mc.fecha, mc.id) AS total
        FROM movimientos_cuenta_corriente mc WHERE mc.cuenta_corriente_id = $1
      )
-     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.comision_descontada, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
+     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.comision_descontada, c.estado_confirmacion, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
             c.movimiento_caja_id, c.created_at, u.nombre AS usuario_nombre, mb.codigo AS moneda_base_codigo, cat.nombre AS categoria_nombre
      FROM corridos c
      JOIN usuarios u ON u.id = c.usuario_id
@@ -679,6 +682,16 @@ export async function guardarTasaHabitual(id: number, tasa: string) {
   const r = await pool.query(`UPDATE cuentas_corrientes SET tasa_habitual = $1 WHERE id = $2 RETURNING id`, [valor.toFixed(8), id]);
   if (!r.rows[0]) throw errorHttp("Cuenta corriente no encontrada", 404);
   return { tasaHabitual: valor.toFixed() };
+}
+
+/** Western (u otro medio que tarda) ya verificó: el movimiento en proceso pasa a confirmado. */
+export async function confirmarMovimiento(movimientoId: number) {
+  const r = await pool.query(
+    `UPDATE movimientos_cuenta_corriente SET estado_confirmacion = 'CONFIRMADA' WHERE id = $1 AND estado_confirmacion = 'EN_PROCESO' AND NOT anulado RETURNING id`,
+    [movimientoId]
+  );
+  if (!r.rows[0]) throw errorHttp("Ese movimiento no está en proceso de confirmación", 409);
+  return { id: movimientoId, estado_confirmacion: "CONFIRMADA" as const };
 }
 
 /** Un error no se borra: se registra el movimiento contrario (y el de caja, si lo hubo). */

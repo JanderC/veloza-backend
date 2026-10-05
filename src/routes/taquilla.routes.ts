@@ -79,7 +79,7 @@ const operacionSchema = z.object({
   cajaLado: z.enum(["MONTO", "RESULTADO", "AMBOS"]),
   resultado: z.string().optional(),
   medio: z.enum(["EFECTIVO", "BANCOLOMBIA"]).optional(),
-  descripcion: z.string().max(300).optional(),
+  descripcion: z.string().max(1000).optional(), // varias líneas: es el mensaje que se le envía al cliente
   clienteNombre: z.string().max(120).optional(),
   clienteTelefono: z.string().max(40).optional(),
   clienteCedula: z.string().max(40).optional(),

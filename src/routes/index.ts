@@ -15,6 +15,7 @@ import { usuariosRouter } from "./usuarios.routes";
 import { whatsappRouter } from "./whatsapp.routes";
 import { cuentasTerceroRouter } from "./cuentasTercero.routes";
 import { documentosTerceroRouter } from "./documentosTercero.routes";
+import { taquillaRouter } from "./taquilla.routes";
 
 export const router = Router();
 
@@ -34,3 +35,4 @@ router.use("/reportes", reportesRouter);
 router.use("/metodos-pago", metodosPagoRouter);
 router.use("/usuarios", usuariosRouter);
 router.use("/whatsapp", whatsappRouter);
+router.use("/taquilla", taquillaRouter);

@@ -316,7 +316,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
 
 // ---------- Ingresos y egresos de ventanilla ----------
 const SELECT_OPERACION = `
-  SELECT o.id, o.tipo, o.cantidad, o.tasa, o.comision_pct, o.divide, o.moneda_operacion, o.medio, o.total, o.descripcion, o.cliente_nombre, o.cliente_telefono, o.cliente_cedula,
+  SELECT o.id, o.tipo, o.cantidad, o.tasa, o.comision_pct, o.divide, o.moneda_operacion, o.medio, o.resultado, o.moneda_resultado, o.caja_lado, o.total, o.descripcion, o.cliente_nombre, o.cliente_telefono, o.cliente_cedula,
          o.estado, o.created_at, o.confirmado_en, m.codigo AS moneda_codigo, u.nombre AS usuario_nombre, uc.nombre AS confirmado_por_nombre
   FROM operaciones_taquilla o
   JOIN monedas m ON m.id = o.moneda_id
@@ -335,12 +335,14 @@ async function aplicarACaja(client: PoolClient, cajaId: number, monedaId: number
 
 interface OperacionInput {
   tipo: "INGRESO" | "EGRESO";
-  monedaCodigo: string; // en qué entra o sale de la caja: COP, USD o EUR
-  cantidad: string; // lo que se compró o vendió (ej. 100.000 bolívares)
-  monedaOperacion?: string; // qué se compró o vendió: VES, USD, USDT, EUR, COP
-  tasa?: string; // cantidad x tasa = total (o cantidad ÷ tasa si dividir)
+  cantidad: string; // lo que trae el cliente o se negocia (ej. 100.000 pesos, o 100.000 bolívares)
+  monedaOperacion: string; // en qué está esa cantidad: VES, USD, USDT, EUR, COP
+  tasa?: string; // cantidad x tasa = resultado (o cantidad ÷ tasa si dividir)
   dividir?: boolean;
-  comisionPct?: string; // % que se descuenta del total
+  comisionPct?: string; // % que se descuenta
+  monedaResultado: string; // en qué queda el resultado
+  // qué lado mueve la caja: lo que trae el cliente (MONTO) o lo que sale de la cuenta (RESULTADO)
+  cajaLado: "MONTO" | "RESULTADO";
   medio?: "EFECTIVO" | "BANCOLOMBIA"; // por Bancolombia es transferencia: no mueve la caja
   descripcion?: string;
   clienteNombre?: string;
@@ -351,43 +353,61 @@ interface OperacionInput {
 }
 
 /**
- * Registra un ingreso o egreso de ventanilla. total = cantidad x tasa, menos la comisión.
+ * Registra un ingreso o egreso de ventanilla, que puede ser una conversión:
+ *   me venden 100.000 Bs a 3,3  -> 100.000 Bs × 3,3 = $330.000   (la caja se mueve por el resultado, en pesos)
+ *   trae $100.000 y quiere Bs   -> $100.000 ÷ 3,3 = Bs 30.303    (la caja se mueve por lo que trae, en pesos)
  * El egreso descuenta de la caja al registrarlo. El ingreso queda pendiente y suma cuando se confirma
- * (o de una vez si llega ya confirmado).
+ * (o de una vez si llega ya confirmado). Por Bancolombia nunca toca la caja.
  */
 export async function crearOperacionTaquilla(input: OperacionInput) {
   const caja = await cajaDeTaquilla();
-  const moneda = (await monedasDeTaquilla()).find((m) => m.codigo === input.monedaCodigo);
-  if (!moneda) throw errorHttp("La caja de taquilla solo maneja pesos, dólares y euros", 400);
   const cantidad = aDecimal(input.cantidad, "El monto");
   if (cantidad.isZero()) throw errorHttp("El monto no puede ser cero", 400);
   const tasa = input.tasa?.trim() ? aDecimal(input.tasa, "La tasa") : null;
   if (tasa && tasa.isZero()) throw errorHttp("La tasa no puede ser cero", 400);
+  if (input.dividir && !tasa) throw errorHttp("Para dividir hace falta la tasa", 400);
   const comision = input.comisionPct?.trim() ? aDecimal(input.comisionPct, "La comisión") : null;
   if (comision && comision.gte(100)) throw errorHttp("La comisión tiene que ser menor al 100%", 400);
-  if (input.dividir && !tasa) throw errorHttp("Para dividir hace falta la tasa", 400);
-  const total = (input.dividir && tasa ? cantidad.div(tasa) : cantidad.times(tasa ?? 1))
+
+  const codigoOperacion = input.monedaOperacion.trim().toUpperCase();
+  const codigoResultado = input.monedaResultado.trim().toUpperCase();
+  const monedas = await pool.query(`SELECT id, codigo, decimales FROM monedas WHERE codigo = ANY($1::text[])`, [[codigoOperacion, codigoResultado]]);
+  const monedaDe = (codigo: string) => monedas.rows.find((m) => m.codigo === codigo) as { id: number; codigo: string; decimales: number } | undefined;
+  const monedaResultado = monedaDe(codigoResultado);
+  const monedaOperacion = monedaDe(codigoOperacion);
+  if (!monedaResultado || !monedaOperacion) throw errorHttp("Moneda no encontrada", 400);
+
+  const resultado = (input.dividir && tasa ? cantidad.div(tasa) : cantidad.times(tasa ?? 1))
     .times(new Decimal(1).minus((comision ?? new Decimal(0)).div(100)))
-    .toDecimalPlaces(Number(moneda.decimales), Decimal.ROUND_HALF_UP);
-  if (!total.isPositive()) throw errorHttp("El total da cero: revisá el monto, la tasa y la comisión", 400);
+    .toDecimalPlaces(Number(monedaResultado.decimales), Decimal.ROUND_HALF_UP);
+  if (!resultado.isPositive()) throw errorHttp("El resultado da cero: revisá el monto y la tasa o la comisión", 400);
+
+  // Lo que mueve la caja: lo que trae el cliente o lo que resulta
+  const monedaCaja = input.cajaLado === "MONTO" ? monedaOperacion : monedaResultado;
+  const total = input.cajaLado === "MONTO" ? cantidad.toDecimalPlaces(Number(monedaOperacion.decimales), Decimal.ROUND_HALF_UP) : resultado;
 
   // El egreso queda hecho ya; el ingreso, solo si viene confirmado. Por Bancolombia es transferencia: nunca mueve la caja
   const aplica = input.tipo === "EGRESO" || !!input.confirmada;
   const medio = input.medio ?? "EFECTIVO";
   const tocaCaja = medio === "EFECTIVO";
+  if (tocaCaja && !(MONEDAS_TAQUILLA as readonly string[]).includes(monedaCaja.codigo)) {
+    throw errorHttp(`La caja de taquilla solo maneja pesos, dólares y euros: no puede moverse en ${monedaCaja.codigo}`, 400);
+  }
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    if (aplica && tocaCaja) await aplicarACaja(client, caja.id, moneda.id, input.tipo === "INGRESO" ? total : total.negated(), input.usuarioId);
+    if (aplica && tocaCaja) await aplicarACaja(client, caja.id, monedaCaja.id, input.tipo === "INGRESO" ? total : total.negated(), input.usuarioId);
     await client.query(
       `INSERT INTO operaciones_taquilla
-        (tipo, moneda_id, cantidad, tasa, comision_pct, total, descripcion, cliente_nombre, cliente_telefono, cliente_cedula, estado, usuario_id, confirmado_en, confirmado_por, moneda_operacion, divide, medio)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $13 THEN now() END, CASE WHEN $13 THEN $12::int END, $14, $15, $16)`,
+        (tipo, moneda_id, cantidad, tasa, comision_pct, total, descripcion, cliente_nombre, cliente_telefono, cliente_cedula, estado, usuario_id,
+         confirmado_en, confirmado_por, moneda_operacion, divide, medio, resultado, moneda_resultado, caja_lado)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $13 THEN now() END, CASE WHEN $13 THEN $12::int END, $14, $15, $16, $17, $18, $19)`,
       [
-        input.tipo, moneda.id, cantidad.toFixed(4), tasa?.toFixed(8) ?? null, comision?.toFixed(4) ?? null, total.toFixed(4),
+        input.tipo, monedaCaja.id, cantidad.toFixed(4), tasa?.toFixed(8) ?? null, comision?.toFixed(4) ?? null, total.toFixed(4),
         input.descripcion?.trim() || null, input.clienteNombre?.trim() || null, input.clienteTelefono?.trim() || null, input.clienteCedula?.trim() || null,
         aplica ? "CONFIRMADA" : "PENDIENTE", input.usuarioId, aplica,
-        input.monedaOperacion?.trim().toUpperCase() || null, !!(input.dividir && tasa), medio,
+        codigoOperacion, !!(input.dividir && tasa), medio, resultado.toFixed(4), codigoResultado, input.cajaLado,
       ]
     );
     await client.query("COMMIT");

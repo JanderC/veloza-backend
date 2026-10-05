@@ -70,12 +70,13 @@ taquillaRouter.post("/solicitudes/:id/pagar", requireAuth, ROLES, async (req, re
 // ---------- Ingresos y egresos de ventanilla ----------
 const operacionSchema = z.object({
   tipo: z.enum(["INGRESO", "EGRESO"]),
-  monedaCodigo: z.enum(["COP", "USD", "EUR"]),
   cantidad: z.string(),
-  monedaOperacion: z.string().max(10).optional(),
+  monedaOperacion: z.string().min(2).max(10),
   tasa: z.string().optional(),
   dividir: z.boolean().optional(),
   comisionPct: z.string().optional(),
+  monedaResultado: z.string().min(2).max(10),
+  cajaLado: z.enum(["MONTO", "RESULTADO"]),
   medio: z.enum(["EFECTIVO", "BANCOLOMBIA"]).optional(),
   descripcion: z.string().max(300).optional(),
   clienteNombre: z.string().max(120).optional(),

@@ -23,6 +23,7 @@ import {
   registrarMovimientoCuentaCorriente,
 } from "../services/cuentaCorriente.service";
 import { importarSaldosIniciales, ResultadoFila } from "../services/importacionSaldos.service";
+import { leerComprobante } from "../services/lecturaComprobante.service";
 
 export const cuentasCorrientesRouter = Router();
 const estadoSchema = z.object({ estado: z.enum(["DISPONIBLE", "BLOQUEADA", "CERRADA"]) });
@@ -295,6 +296,23 @@ cuentasCorrientesRouter.get("/:id/movimientos", requireAuth, async (req, res, ne
     next(err);
   }
 });
+
+// Lee la imagen de un comprobante y devuelve referencia, monto y fecha para llenar el movimiento
+cuentasCorrientesRouter.post(
+  "/leer-comprobante",
+  requireAuth,
+  requireRole("ADMIN", "ASESOR", "CAJERO"),
+  upload.single("imagen"),
+  async (req, res, next) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: "Adjuntá la imagen del comprobante" });
+      if (!/^image\/(jpeg|png|webp|gif)$/.test(req.file.mimetype)) return res.status(400).json({ error: "El comprobante tiene que ser una imagen (JPG, PNG o WebP)" });
+      res.json(await leerComprobante(req.file.buffer, req.file.mimetype));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 // ---------- Registrar movimiento ----------
 

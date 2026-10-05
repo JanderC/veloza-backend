@@ -228,7 +228,7 @@ cuentasCorrientesRouter.post("/movimientos/:id/confirmar", requireAuth, requireR
 // ¿Ya se registró un movimiento con ese número de transferencia? (para no cargarlo dos veces)
 cuentasCorrientesRouter.get("/movimientos/numero/:numero", requireAuth, async (req, res, next) => {
   try {
-    const numero = z.string().regex(/^\d{4,30}$/).parse(req.params.numero);
+    const numero = z.string().regex(/^[A-Za-z0-9-]{4,40}$/).parse(req.params.numero);
     res.json({ movimiento: await buscarMovimientoPorNumero(numero) });
   } catch (err) {
     next(err);

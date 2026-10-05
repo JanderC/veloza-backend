@@ -410,7 +410,8 @@ export async function eliminarCuentaCorriente(id: number) {
 
 /**
  * ¿Ya hay un movimiento con ese número de transferencia? Se busca en lo anotado después de la referencia
- * ("Abono Zelle · Juan 123456"), en todas las cuentas, sin contar los anulados.
+ * ("Abono Zelle · Juan 123456" o "Recibe Zelle · d1a1kat6i"), en todas las cuentas, sin contar los anulados.
+ * La referencia puede tener letras: se compara completa, sin distinguir mayúsculas.
  */
 export async function buscarMovimientoPorNumero(numero: string) {
   const r = await pool.query(
@@ -419,7 +420,7 @@ export async function buscarMovimientoPorNumero(numero: string) {
      JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
      JOIN terceros t ON t.id = cc.tercero_id
      WHERE NOT mc.anulado AND position(' · ' in mc.descripcion) > 0
-       AND regexp_replace(split_part(mc.descripcion, ' · ', 2), ' \([0-9.,]+ [A-Z]{3,5} a [0-9.,]+\)$', '') ~ ('(^|[^0-9])' || $1 || '([^0-9]|$)')
+       AND regexp_replace(split_part(mc.descripcion, ' · ', 2), ' \([0-9.,]+ [A-Z]{3,5} a [0-9.,]+\)$', '') ~* ('(^|[^a-z0-9])' || $1 || '([^a-z0-9]|$)')
      ORDER BY mc.id DESC LIMIT 1`,
     [numero]
   );

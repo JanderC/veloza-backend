@@ -42,7 +42,7 @@ async function monedasDeTaquilla(db: { query: PoolClient["query"] } = pool) {
 const SELECT_SOLICITUD = `
   SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, mc.cantidad_base, mc.tasa, mc.comision_descontada, mc.cuenta_destino,
          mc.estado_confirmacion, (mc.comprobante_key IS NOT NULL) AS tiene_comprobante,
-         mc.pagado_en, up.nombre AS pagado_por_nombre, ur.nombre AS registrado_por_nombre,
+         mc.pagado_en, mc.pagado_medio, up.nombre AS pagado_por_nombre, ur.nombre AS registrado_por_nombre,
          cc.id AS cuenta_id, cc.referencia AS cliente_referencia, m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,
          ch.nombre AS canal_nombre,
          t.nombre AS cliente_nombre, t.telefono AS cliente_telefono, t.identificacion AS cliente_cedula
@@ -111,7 +111,13 @@ export async function obtenerTaquilla() {
     ? await pool.query(`${SELECT_SOLICITUD} AND mc.pagado_en >= $1 ORDER BY mc.pagado_en DESC`, [abiertaEn])
     : await pool.query(`${SELECT_SOLICITUD} AND (mc.pagado_en AT TIME ZONE '${ZONA}')::date = (now() AT TIME ZONE '${ZONA}')::date ORDER BY mc.pagado_en DESC`);
 
+  // Pagos hechos por Bancolombia en el mismo período: cuántos y cuánto. No tocan la caja.
+  const porBanco = pagadas.rows.filter((s) => s.pagado_medio === "BANCOLOMBIA");
+  const totalesBanco = new Map<string, Decimal>();
+  for (const s of porBanco) totalesBanco.set(s.moneda_codigo, (totalesBanco.get(s.moneda_codigo) ?? new Decimal(0)).plus(s.monto));
+
   return {
+    pagosBancolombia: { cantidad: porBanco.length, totales: [...totalesBanco.entries()].map(([codigo, total]) => ({ codigo, total: total.toFixed(4) })) },
     caja: { ...caja, saldos: porMoneda },
     sesion: { abierta, abierta_en: abiertaEn, abierta_por: abierta ? (turnos.rows[0].usuario_nombre as string) : null },
     ultimoCierre: ultimo.rows.length
@@ -241,10 +247,13 @@ export async function moverCajaTaquilla(input: { monedaCodigo: string; monto: st
 }
 
 /**
- * "Se pagó": al cliente se le entrega su efectivo. Descuenta de la caja de taquilla y deja saldada su cuenta
- * (registra el pago en su hoja). Una solicitud no se paga dos veces, ni antes de que Western la confirme.
+ * "Se pagó": al cliente se le entrega lo suyo y su cuenta queda saldada (se registra el pago en su hoja).
+ *   EFECTIVO:    sale de la caja de taquilla (tiene que estar abierta y tener con qué).
+ *   BANCOLOMBIA: se le transfirió; no toca la caja, solo queda contado como pago por Bancolombia.
+ * Una solicitud no se paga dos veces, ni antes de que esté confirmada.
  */
-export async function pagarSolicitud(movimientoId: number, usuarioId: number) {
+export async function pagarSolicitud(movimientoId: number, usuarioId: number, medio: "EFECTIVO" | "BANCOLOMBIA" = "EFECTIVO") {
+  const enEfectivo = medio === "EFECTIVO";
   const caja = await cajaDeTaquilla();
   const previa = await pool.query(
     `SELECT mc.estado_confirmacion, mc.pagado_en, cc.moneda_id, m.codigo AS moneda_codigo
@@ -256,18 +265,20 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number) {
   if (!p) throw errorHttp("Solicitud no encontrada", 404);
   if (p.pagado_en) throw errorHttp("Esa solicitud ya se pagó", 409);
   if (p.estado_confirmacion === "EN_PROCESO") throw errorHttp("Esa transferencia todavía no está confirmada: se confirma en Confirmaciones y después se paga", 409);
-  if (!(MONEDAS_TAQUILLA as readonly string[]).includes(p.moneda_codigo)) {
-    throw errorHttp(`Esa solicitud se paga en ${p.moneda_codigo} y la caja de taquilla solo maneja pesos, dólares y euros`, 409);
+  if (enEfectivo) {
+    if (!(MONEDAS_TAQUILLA as readonly string[]).includes(p.moneda_codigo)) {
+      throw errorHttp(`Esa solicitud se paga en ${p.moneda_codigo} y la caja de taquilla solo maneja pesos, dólares y euros`, 409);
+    }
+    await exigirSesion(caja.id, p.moneda_id);
   }
-  await exigirSesion(caja.id, p.moneda_id);
 
   // Se aparta primero: si dos personas tocan "Se pagó" a la vez, solo una sigue
   const apartada = await pool.query(
-    `UPDATE movimientos_cuenta_corriente mc SET pagado_en = now(), pagado_por = $2
+    `UPDATE movimientos_cuenta_corriente mc SET pagado_en = now(), pagado_por = $2, pagado_medio = $3
      FROM cuentas_corrientes cc
      WHERE mc.id = $1 AND cc.id = mc.cuenta_corriente_id AND mc.pagado_en IS NULL AND NOT mc.anulado
      RETURNING mc.id, mc.monto, mc.descripcion, cc.tercero_id, cc.canal_id, cc.moneda_id`,
-    [movimientoId, usuarioId]
+    [movimientoId, usuarioId, medio]
   );
   const s = apartada.rows[0];
   if (!s) throw errorHttp("Esa solicitud ya se pagó", 409);
@@ -280,17 +291,15 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number) {
       monedaId: s.moneda_id,
       tipo: "ABONO",
       monto: new Decimal(s.monto).negated().toFixed(4),
-      descripcion: `Pago en taquilla${referencia ? ` · ${referencia}` : ""}`,
+      descripcion: `${enEfectivo ? "Pago en taquilla" : "Pago por Bancolombia"}${referencia ? ` · ${referencia}` : ""}`,
       usuarioId,
-      // el efectivo sale de la caja de taquilla, en la moneda de la cuenta del cliente
-      cajaId: caja.id,
-      montoCaja: new Decimal(s.monto).negated().toFixed(4),
-      monedaCajaId: s.moneda_id,
+      // en efectivo sale de la caja de taquilla, en la moneda de la cuenta del cliente; por Bancolombia la caja no se toca
+      ...(enEfectivo ? { cajaId: caja.id, montoCaja: new Decimal(s.monto).negated().toFixed(4), monedaCajaId: s.moneda_id } : {}),
     });
     await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_movimiento_id = $1 WHERE id = $2`, [pago.movimiento.id, movimientoId]);
   } catch (err) {
     // no se pudo pagar (p. ej. la caja no tiene tanto): la solicitud vuelve a quedar por pagar
-    await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_en = NULL, pagado_por = NULL WHERE id = $1`, [movimientoId]);
+    await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_en = NULL, pagado_por = NULL, pagado_medio = NULL WHERE id = $1`, [movimientoId]);
     throw err;
   }
   return obtenerTaquilla();

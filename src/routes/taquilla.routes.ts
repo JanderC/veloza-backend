@@ -46,12 +46,13 @@ taquillaRouter.post("/caja", requireAuth, ROLES, async (req, res, next) => {
   }
 });
 
-// "Se pagó": descuenta de la caja y salda la cuenta del cliente
+// "Se pagó": en efectivo descuenta de la caja; por Bancolombia no la toca. En los dos casos salda la cuenta del cliente
 taquillaRouter.post("/solicitudes/:id/pagar", requireAuth, ROLES, async (req, res, next) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
-    res.json(await pagarSolicitud(id, req.user!.id));
+    const { medio } = z.object({ medio: z.enum(["EFECTIVO", "BANCOLOMBIA"]).default("EFECTIVO") }).parse(req.body ?? {});
+    res.json(await pagarSolicitud(id, req.user!.id, medio));
   } catch (err) {
     next(err);
   }

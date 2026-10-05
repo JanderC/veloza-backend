@@ -159,8 +159,9 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
       const saldoCajaNuevo =
         tipoMovimiento === "INGRESO" ? saldoCajaAnterior.plus(montoAbsoluto) : saldoCajaAnterior.minus(montoAbsoluto);
 
-      // Todo movimiento alimenta una caja, así que no se frena por saldo: si la caja queda en negativo
-      // se ve en el tablero (falta cargarle lo que tenía) en vez de impedir registrar la operación.
+      if (saldoCajaNuevo.isNegative()) {
+        throw Object.assign(new Error("Saldo insuficiente en caja para este movimiento"), { status: 409 });
+      }
 
       await client.query(`UPDATE saldos_caja SET monto = $1 WHERE id = $2`, [saldoCajaNuevo.toFixed(4), saldoCajaId]);
 

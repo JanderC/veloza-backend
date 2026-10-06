@@ -2,6 +2,8 @@ import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
 import { registrarMovimientoCuentaCorriente } from "./cuentaCorriente.service";
+import { abrirTurnoSiFalta } from "./cierreCaja.service";
+import { aplicarMovimientoLeg } from "./transaccionService";
 import { generarUrlTemporal, subirArchivo } from "./almacenamiento.service";
 
 const ZONA = "America/Bogota";
@@ -125,7 +127,15 @@ export async function obtenerTaquilla() {
   const totalesBanco = new Map<string, Decimal>();
   for (const s of porBanco) totalesBanco.set(s.moneda_codigo, (totalesBanco.get(s.moneda_codigo) ?? new Decimal(0)).plus(s.monto));
 
+  // La Caja Fuerte alimenta a la taquilla y recibe lo que queda al cerrar: se muestra cuánto tiene
+  const fuerte = await cajaFuerte();
+  const saldosFuerte = await pool.query(`SELECT moneda_id, monto FROM saldos_caja WHERE caja_id = $1`, [fuerte.id]);
+
   return {
+    cajaFuerte: {
+      ...fuerte,
+      saldos: monedas.map((m) => ({ codigo: m.codigo, monto: new Decimal(saldosFuerte.rows.find((s) => s.moneda_id === m.id)?.monto ?? 0).toFixed(4) })),
+    },
     operaciones: operaciones.rows,
     pagosBancolombia: { cantidad: porBanco.length, totales: [...totalesBanco.entries()].map(([codigo, total]) => ({ codigo, total: total.toFixed(4) })) },
     caja: { ...caja, saldos: porMoneda },
@@ -153,12 +163,49 @@ async function fijarSaldo(client: PoolClient, cajaId: number, monedaId: number, 
   }
 }
 
+/** La Caja Fuerte: de ahí sale el efectivo con que arranca la taquilla y ahí vuelve al cerrar. */
+async function cajaFuerte() {
+  const r = await pool.query(`SELECT id, nombre FROM cajas WHERE tipo = 'FUERTE' AND activo ORDER BY es_principal DESC, id LIMIT 1`);
+  if (!r.rows[0]) throw errorHttp("No hay una Caja Fuerte configurada", 409);
+  return r.rows[0] as { id: number; nombre: string };
+}
+
+/**
+ * Pasa efectivo de una caja a otra dentro de una transacción ya abierta. Queda registrado como transferencia interna,
+ * igual que las que se hacen desde el módulo Cajas. Abre el turno de cada caja en esa moneda si hacía falta.
+ */
+async function pasarEntreCajas(
+  client: PoolClient,
+  p: { origen: { id: number; nombre: string }; destino: { id: number; nombre: string }; monedaId: number; codigo: string; monto: Decimal; usuarioId: number; observacion: string }
+) {
+  if (!p.monto.isPositive()) return;
+  await abrirTurnoSiFalta(client, p.origen.id, p.monedaId, p.usuarioId);
+  await abrirTurnoSiFalta(client, p.destino.id, p.monedaId, p.usuarioId);
+  // Bloqueo en orden fijo, como en las transferencias del módulo Cajas
+  await client.query(`SELECT id FROM saldos_caja WHERE moneda_id = $1 AND caja_id = ANY($2::int[]) ORDER BY caja_id FOR UPDATE`, [p.monedaId, [p.origen.id, p.destino.id]]);
+  const tx = await client.query(
+    `INSERT INTO transacciones
+      (tipo, estado, caja_id, caja_destino_id, moneda_origen_id, monto_origen, moneda_destino_id, monto_destino, usuario_id, confirmada_en, confirmado_por_id, observacion)
+     VALUES ('TRANSFERENCIA_INTERNA', 'CONFIRMADA', $1, $2, $3, $4, $3, $4, $5, now(), $5, $6) RETURNING id`,
+    [p.origen.id, p.destino.id, p.monedaId, p.monto.toFixed(4), p.usuarioId, p.observacion]
+  );
+  try {
+    await aplicarMovimientoLeg(client, { cajaId: p.origen.id, monedaId: p.monedaId, tipo: "EGRESO", monto: p.monto, transaccionId: tx.rows[0].id, usuarioId: p.usuarioId });
+  } catch (err) {
+    if (/saldo insuficiente/i.test((err as Error).message)) throw errorHttp(`${p.origen.nombre} no tiene tanto en ${p.codigo}`, 409);
+    throw err;
+  }
+  await aplicarMovimientoLeg(client, { cajaId: p.destino.id, monedaId: p.monedaId, tipo: "INGRESO", monto: p.monto, transaccionId: tx.rows[0].id, usuarioId: p.usuarioId });
+}
+
 /**
  * Abrir la caja de taquilla: se declara con cuánto efectivo arranca en pesos, dólares y euros.
- * La caja queda en esos montos y desde ahí se va sumando y descontando todo hasta el cuadre.
+ * desdeCajaFuerte: ese efectivo sale de la Caja Fuerte (se transfiere lo que falte, o se devuelve lo que sobre).
+ * Si no, la caja queda directamente en lo declarado. Desde ahí se va sumando y descontando todo hasta el cuadre.
  */
-export async function abrirSesionTaquilla(input: { montos: Partial<Record<CodigoMoneda, string>>; usuarioId: number }) {
+export async function abrirSesionTaquilla(input: { montos: Partial<Record<CodigoMoneda, string>>; desdeCajaFuerte?: boolean; usuarioId: number }) {
   const caja = await cajaDeTaquilla();
+  const fuerte = await cajaFuerte();
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -166,9 +213,20 @@ export async function abrirSesionTaquilla(input: { montos: Partial<Record<Codigo
     if (abierta.rows.length) throw errorHttp("La caja de taquilla ya está abierta", 409);
     for (const m of await monedasDeTaquilla(client)) {
       const inicial = aDecimal(input.montos[m.codigo], `El monto inicial en ${m.codigo}`);
-      await fijarSaldo(client, caja.id, m.id, inicial, input.usuarioId);
+      if (input.desdeCajaFuerte) {
+        const saldo = await client.query(`SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2`, [caja.id, m.id]);
+        const falta = inicial.minus(saldo.rows[0]?.monto ?? 0);
+        const base = { monedaId: m.id, codigo: m.codigo, usuarioId: input.usuarioId };
+        if (falta.isPositive()) await pasarEntreCajas(client, { ...base, origen: fuerte, destino: caja, monto: falta, observacion: "Apertura de taquilla" });
+        else if (falta.isNegative()) await pasarEntreCajas(client, { ...base, origen: caja, destino: fuerte, monto: falta.abs(), observacion: "Apertura de taquilla: sobrante" });
+      } else {
+        await fijarSaldo(client, caja.id, m.id, inicial, input.usuarioId);
+      }
+      // el turno de esa moneda arranca con lo declarado (si la transferencia ya lo había abierto, se actualiza)
       await client.query(
-        `INSERT INTO cierres_caja (caja_id, moneda_id, usuario_id, fecha_apertura, saldo_inicial, estado) VALUES ($1, $2, $3, now(), $4, 'ABIERTA')`,
+        `INSERT INTO cierres_caja (caja_id, moneda_id, usuario_id, fecha_apertura, saldo_inicial, estado) VALUES ($1, $2, $3, now(), $4, 'ABIERTA')
+         ON CONFLICT (caja_id, moneda_id) WHERE estado = 'ABIERTA'
+         DO UPDATE SET saldo_inicial = EXCLUDED.saldo_inicial, fecha_apertura = EXCLUDED.fecha_apertura, usuario_id = EXCLUDED.usuario_id`,
         [caja.id, m.id, input.usuarioId, inicial.toFixed(4)]
       );
     }
@@ -184,22 +242,31 @@ export async function abrirSesionTaquilla(input: { montos: Partial<Record<Codigo
 
 /**
  * Cerrar y cuadrar: se cuenta el efectivo de cada moneda y se compara con lo que debía haber.
- * Queda guardado lo esperado, lo contado y la diferencia (contado - esperado).
+ * Queda guardado lo esperado, lo contado y la diferencia (contado - esperado), y lo contado pasa a la Caja Fuerte:
+ * la taquilla termina el día en cero.
  */
 export async function cerrarSesionTaquilla(input: { contado: Partial<Record<CodigoMoneda, string>>; usuarioId: number }) {
   const caja = await cajaDeTaquilla();
+  const fuerte = await cajaFuerte();
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const abierta = await client.query(`SELECT 1 FROM cierres_caja WHERE caja_id = $1 AND estado = 'ABIERTA' LIMIT 1`, [caja.id]);
+    if (!abierta.rows.length) throw errorHttp("La caja de taquilla no está abierta", 409);
+    const monedas = await monedasDeTaquilla(client);
+    // todas las monedas se cierran, aunque alguna no se haya movido en el día
+    for (const m of monedas) await abrirTurnoSiFalta(client, caja.id, m.id, input.usuarioId);
     // FOR UPDATE espera a que terminen los pagos en curso
     const turnos = await client.query(`SELECT id, moneda_id FROM cierres_caja WHERE caja_id = $1 AND estado = 'ABIERTA' FOR UPDATE`, [caja.id]);
-    if (!turnos.rows.length) throw errorHttp("La caja de taquilla no está abierta", 409);
-    for (const m of await monedasDeTaquilla(client)) {
+    for (const m of monedas) {
       const turno = turnos.rows.find((t) => t.moneda_id === m.id);
       if (!turno) continue;
       const real = aDecimal(input.contado[m.codigo], `Lo contado en ${m.codigo}`);
       const saldo = await client.query(`SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2`, [caja.id, m.id]);
       const esperado = new Decimal(saldo.rows[0]?.monto ?? 0);
+      // la caja queda en lo que de verdad se contó (la diferencia queda anotada) y eso pasa a la Caja Fuerte
+      await fijarSaldo(client, caja.id, m.id, real, input.usuarioId);
+      await pasarEntreCajas(client, { origen: caja, destino: fuerte, monedaId: m.id, codigo: m.codigo, monto: real, usuarioId: input.usuarioId, observacion: "Cierre de taquilla" });
       await client.query(
         `UPDATE cierres_caja SET fecha_cierre = now(), saldo_esperado = $1, saldo_real = $2, diferencia = $3, estado = 'CERRADA' WHERE id = $4`,
         [esperado.toFixed(4), real.toFixed(4), real.minus(esperado).toFixed(4), turno.id]
@@ -215,10 +282,48 @@ export async function cerrarSesionTaquilla(input: { contado: Partial<Record<Codi
   return obtenerTaquilla();
 }
 
-/** ¿Está abierta la caja de taquilla en esa moneda? */
-async function exigirSesion(cajaId: number, monedaId: number) {
-  const r = await pool.query(`SELECT 1 FROM cierres_caja WHERE caja_id = $1 AND moneda_id = $2 AND estado = 'ABIERTA'`, [cajaId, monedaId]);
+/**
+ * Traer efectivo de la Caja Fuerte a la taquilla, o enviárselo. Con la taquilla cerrada también se puede traer:
+ * alimentarla la deja abierta en esa moneda.
+ */
+export async function moverConCajaFuerte(input: { monedaCodigo: string; monto: string; sentido: "TRAER" | "ENVIAR"; usuarioId: number }) {
+  const monto = aDecimal(input.monto, "El monto");
+  if (monto.isZero()) throw errorHttp("El monto no puede ser cero", 400);
+  const caja = await cajaDeTaquilla();
+  const fuerte = await cajaFuerte();
+  const moneda = (await monedasDeTaquilla()).find((m) => m.codigo === input.monedaCodigo);
+  if (!moneda) throw errorHttp("La caja de taquilla solo maneja pesos, dólares y euros", 400);
+  const traer = input.sentido === "TRAER";
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await pasarEntreCajas(client, {
+      origen: traer ? fuerte : caja,
+      destino: traer ? caja : fuerte,
+      monedaId: moneda.id,
+      codigo: moneda.codigo,
+      monto,
+      usuarioId: input.usuarioId,
+      observacion: traer ? "Caja Fuerte alimenta a Taquilla" : "Taquilla envía a Caja Fuerte",
+    });
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+  return obtenerTaquilla();
+}
+
+/**
+ * ¿Está abierta la caja de taquilla? Si está abierta pero esa moneda todavía no tenía turno
+ * (p. ej. se abrió alimentándola solo en pesos), se abre el de esa moneda.
+ */
+async function exigirSesion(cajaId: number, monedaId: number, usuarioId: number, db: PoolClient | typeof pool = pool) {
+  const r = await db.query(`SELECT moneda_id FROM cierres_caja WHERE caja_id = $1 AND estado = 'ABIERTA'`, [cajaId]);
   if (!r.rows.length) throw errorHttp("Primero hay que abrir la caja de taquilla", 409);
+  if (!r.rows.some((t) => t.moneda_id === monedaId)) await abrirTurnoSiFalta(db as PoolClient, cajaId, monedaId, usuarioId);
 }
 
 /**
@@ -237,7 +342,7 @@ export async function moverCajaTaquilla(input: { monedaCodigo: string; monto: st
   const caja = await cajaDeTaquilla();
   const moneda = (await monedasDeTaquilla()).find((m) => m.codigo === input.monedaCodigo);
   if (!moneda) throw errorHttp("La caja de taquilla solo maneja pesos, dólares y euros", 400);
-  await exigirSesion(caja.id, moneda.id);
+  await exigirSesion(caja.id, moneda.id, input.usuarioId);
 
   const client = await pool.connect();
   try {
@@ -279,7 +384,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
     if (!(MONEDAS_TAQUILLA as readonly string[]).includes(p.moneda_codigo)) {
       throw errorHttp(`Esa solicitud se paga en ${p.moneda_codigo} y la caja de taquilla solo maneja pesos, dólares y euros`, 409);
     }
-    await exigirSesion(caja.id, p.moneda_id);
+    await exigirSesion(caja.id, p.moneda_id, usuarioId);
   }
 
   // Se aparta primero: si dos personas tocan "Se pagó" a la vez, solo una sigue
@@ -326,8 +431,7 @@ const SELECT_OPERACION = `
 
 /** Suma (delta > 0) o descuenta (delta < 0) de la caja, sin dejarla en negativo. Dentro de una transacción. */
 async function aplicarACaja(client: PoolClient, cajaId: number, monedaId: number, delta: Decimal, usuarioId: number) {
-  const abierta = await client.query(`SELECT 1 FROM cierres_caja WHERE caja_id = $1 AND moneda_id = $2 AND estado = 'ABIERTA' FOR SHARE`, [cajaId, monedaId]);
-  if (!abierta.rows.length) throw errorHttp("Primero hay que abrir la caja de taquilla", 409);
+  await exigirSesion(cajaId, monedaId, usuarioId, client);
   const saldo = await client.query(`SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`, [cajaId, monedaId]);
   const nuevo = new Decimal(saldo.rows[0]?.monto ?? 0).plus(delta);
   if (nuevo.isNegative()) throw errorHttp("La caja no tiene tanto para ese egreso", 409);

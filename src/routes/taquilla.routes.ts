@@ -8,6 +8,7 @@ import {
   cerrarSesionTaquilla,
   confirmarOperacionTaquilla,
   crearOperacionTaquilla,
+  moverConCajaFuerte,
   guardarComprobanteOperacion,
   moverCajaTaquilla,
   obtenerTaquilla,
@@ -31,8 +32,8 @@ taquillaRouter.get("/", requireAuth, ROLES, async (_req, res, next) => {
 // Abrir la caja: con cuánto efectivo arranca en cada moneda
 taquillaRouter.post("/sesion/abrir", requireAuth, ROLES, async (req, res, next) => {
   try {
-    const { montos } = z.object({ montos: porMoneda }).parse(req.body);
-    res.status(201).json(await abrirSesionTaquilla({ montos, usuarioId: req.user!.id }));
+    const { montos, desdeCajaFuerte } = z.object({ montos: porMoneda, desdeCajaFuerte: z.boolean().optional() }).parse(req.body);
+    res.status(201).json(await abrirSesionTaquilla({ montos, desdeCajaFuerte, usuarioId: req.user!.id }));
   } catch (err) {
     next(err);
   }
@@ -53,6 +54,16 @@ taquillaRouter.post("/caja", requireAuth, ROLES, async (req, res, next) => {
   try {
     const datos = z.object({ monedaCodigo: z.enum(["COP", "USD", "EUR"]), monto: z.string() }).parse(req.body);
     res.status(201).json(await moverCajaTaquilla({ ...datos, usuarioId: req.user!.id }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Traer efectivo de la Caja Fuerte a la taquilla, o enviárselo
+taquillaRouter.post("/caja-fuerte", requireAuth, ROLES, async (req, res, next) => {
+  try {
+    const datos = z.object({ monedaCodigo: z.enum(["COP", "USD", "EUR"]), monto: z.string(), sentido: z.enum(["TRAER", "ENVIAR"]) }).parse(req.body);
+    res.status(201).json(await moverConCajaFuerte({ ...datos, usuarioId: req.user!.id }));
   } catch (err) {
     next(err);
   }

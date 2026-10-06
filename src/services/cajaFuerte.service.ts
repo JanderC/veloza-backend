@@ -139,7 +139,7 @@ export async function registrarMovimientoCajaFuerte(input: { tipo: "INGRESO" | "
   } catch {
     throw errorHttp("El monto no es un número válido", 400);
   }
-  if (!monto.isFinite() || !monto.isPositive()) throw errorHttp("El monto tiene que ser mayor a cero", 400);
+  if (!monto.isFinite() || !monto.gt(0)) throw errorHttp("El monto tiene que ser mayor a cero", 400);
   const concepto = input.concepto.trim();
   if (concepto.length < 3) throw errorHttp("Escribí la referencia: de dónde viene o a dónde va el dinero", 400);
 
@@ -147,7 +147,7 @@ export async function registrarMovimientoCajaFuerte(input: { tipo: "INGRESO" | "
   const moneda = (await pool.query(`SELECT id, codigo, decimales FROM monedas WHERE codigo = $1`, [input.monedaCodigo])).rows[0];
   if (!moneda || !(MONEDAS_CAJA_FUERTE as readonly string[]).includes(moneda.codigo)) throw errorHttp("La Caja Fuerte se lleva en dólares, pesos y euros", 400);
   monto = monto.toDecimalPlaces(Number(moneda.decimales), Decimal.ROUND_HALF_UP);
-  if (!monto.isPositive()) throw errorHttp("El monto tiene que ser mayor a cero", 400);
+  if (!monto.gt(0)) throw errorHttp("El monto tiene que ser mayor a cero", 400);
 
   const client = await pool.connect();
   try {

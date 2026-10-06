@@ -227,7 +227,8 @@ async function pasarEntreCajas(
   client: PoolClient,
   p: { origen: { id: number; nombre: string }; destino: { id: number; nombre: string }; monedaId: number; codigo: string; monto: Decimal; usuarioId: number; observacion: string }
 ) {
-  if (!p.monto.isPositive()) return;
+  // (isPositive() de decimal.js da verdadero para el cero: por eso se compara con gt(0))
+  if (!p.monto.gt(0)) return;
   await abrirTurnoSiFalta(client, p.origen.id, p.monedaId, p.usuarioId);
   await abrirTurnoSiFalta(client, p.destino.id, p.monedaId, p.usuarioId);
   // Bloqueo en orden fijo, como en las transferencias del módulo Cajas
@@ -266,7 +267,7 @@ export async function abrirSesionTaquilla(input: { montos: Partial<Record<Codigo
         const saldo = await client.query(`SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2`, [caja.id, m.id]);
         const falta = inicial.minus(saldo.rows[0]?.monto ?? 0);
         const base = { monedaId: m.id, codigo: m.codigo, usuarioId: input.usuarioId };
-        if (falta.isPositive()) await pasarEntreCajas(client, { ...base, origen: fuerte, destino: caja, monto: falta, observacion: `Apertura de ${caja.nombre}` });
+        if (falta.gt(0)) await pasarEntreCajas(client, { ...base, origen: fuerte, destino: caja, monto: falta, observacion: `Apertura de ${caja.nombre}` });
         else if (falta.isNegative()) await pasarEntreCajas(client, { ...base, origen: caja, destino: fuerte, monto: falta.abs(), observacion: `Apertura de ${caja.nombre}: sobrante` });
       } else {
         await fijarSaldo(client, caja.id, m.id, inicial, input.usuarioId);
@@ -540,7 +541,7 @@ export async function crearOperacionTaquilla(input: OperacionInput) {
       ? aDecimal(input.resultado, "El resultado")
       : (input.dividir && tasa ? cantidad.div(tasa) : cantidad.times(tasa ?? 1)).times(new Decimal(1).minus((comision ?? new Decimal(0)).div(100)))
   ).toDecimalPlaces(Number(monedaResultado.decimales), Decimal.ROUND_HALF_UP);
-  if (!resultado.isPositive()) throw errorHttp("El resultado da cero: revisá el monto y la tasa o la comisión", 400);
+  if (!resultado.gt(0)) throw errorHttp("El resultado da cero: revisá el monto y la tasa o la comisión", 400);
 
   // Lo que mueve la caja. El total guardado es el lado del monto (o del resultado si solo ese la mueve)
   const montoRedondeado = cantidad.toDecimalPlaces(Number(monedaOperacion.decimales), Decimal.ROUND_HALF_UP);

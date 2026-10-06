@@ -18,10 +18,10 @@ import {
   urlComprobanteOperacion,
 } from "../services/taquilla.service";
 
-// El mismo router atiende las dos taquillas: montado en /taquilla es la 1 y en /taquilla-2 la 2.
+// El mismo router atiende todas las taquillas: montado en /taquilla es la 1, en /taquilla-2 la 2, en /taquilla-3 la 3.
 export const taquillaRouter = Router();
 function t<T>(req: Request, fn: () => Promise<T>) {
-  return enTaquilla(req.baseUrl.endsWith("/taquilla-2") ? 2 : 1, fn);
+  return enTaquilla(Number(/\/taquilla-(\d+)$/.exec(req.baseUrl)?.[1] ?? 1), fn);
 }
 const ROLES = requireRole("ADMIN", "ASESOR", "CAJERO");
 const porMoneda = z.object({ COP: z.string().optional(), USD: z.string().optional(), EUR: z.string().optional() });

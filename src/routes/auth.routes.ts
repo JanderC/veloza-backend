@@ -32,7 +32,7 @@ authRouter.post("/login", async (req, res, next) => {
     }
 
     const token = jwt.sign({ id: usuario.id, rol: usuario.rol }, env.JWT_SECRET, {
-      expiresIn: "8h",
+      expiresIn: "365d", // un año: con 8 horas la sesión se vencía en plena jornada
     });
 
     // usuario: para que el front sepa quién está conectado (ej. ocultar Aprobar en sus propios documentos)

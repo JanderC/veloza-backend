@@ -13,6 +13,7 @@ const filtrosSchema = z.object({
   porPagina: z.coerce.number().int().min(5).max(100).optional(),
   moneda: z.enum(["USD", "COP", "EUR"]).optional(),
   tipo: z.enum(["INGRESO", "EGRESO"]).optional(),
+  cajaId: z.coerce.number().int().optional(),
 });
 
 // Saldos en dólares, pesos y euros, lo de hoy y los movimientos paginados

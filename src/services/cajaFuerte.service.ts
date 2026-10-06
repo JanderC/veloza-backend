@@ -22,6 +22,7 @@ export interface FiltrosCajaFuerte {
   porPagina?: number;
   moneda?: CodigoMoneda;
   tipo?: "INGRESO" | "EGRESO";
+  cajaId?: number; // ver los movimientos de otra caja (por defecto, los de la Caja Fuerte)
 }
 
 /**
@@ -49,6 +50,25 @@ export async function obtenerCajaFuerte(filtros: FiltrosCajaFuerte = {}) {
     [caja.id, codigos]
   );
 
+  // Todas las cajas creadas, con los mismos tres saldos: la Caja Fuerte primero, después las taquillas y el resto
+  const cajas = await pool.query(
+    `SELECT c.id, c.nombre, c.tipo::text AS tipo,
+            COALESCE(sum(s.monto) FILTER (WHERE m.codigo = 'USD'), 0) AS usd,
+            COALESCE(sum(s.monto) FILTER (WHERE m.codigo = 'COP'), 0) AS cop,
+            COALESCE(sum(s.monto) FILTER (WHERE m.codigo = 'EUR'), 0) AS eur
+     FROM cajas c
+     LEFT JOIN saldos_caja s ON s.caja_id = c.id
+     LEFT JOIN monedas m ON m.id = s.moneda_id
+     WHERE c.activo
+     GROUP BY c.id
+     ORDER BY (c.id = $1) DESC, c.taquilla_numero NULLS LAST, (c.tipo::text = 'BANCO'), c.nombre`,
+    [caja.id]
+  );
+  // De qué caja se listan los movimientos
+  const vista = filtros.cajaId ? cajas.rows.find((c) => c.id === filtros.cajaId) : undefined;
+  if (filtros.cajaId && !vista) throw errorHttp("Caja no encontrada", 404);
+  const cajaMovimientos = vista ? { id: vista.id as number, nombre: vista.nombre as string } : caja;
+
   // Los movimientos de la caja en esas tres monedas; los filtros solo eligen cuáles se listan
   const BASE = `
     WITH m AS (
@@ -64,7 +84,7 @@ export async function obtenerCajaFuerte(filtros: FiltrosCajaFuerte = {}) {
       WHERE k.caja_id = $1 AND mo.codigo = ANY($2::text[])
     )`;
   const FILTRO = `($3::text IS NULL OR codigo = $3) AND ($4::text IS NULL OR tipo = $4)`;
-  const parametros = [caja.id, codigos, filtros.moneda ?? null, filtros.tipo ?? null];
+  const parametros = [cajaMovimientos.id, codigos, filtros.moneda ?? null, filtros.tipo ?? null];
   const total = Number((await pool.query(`${BASE} SELECT count(*) AS n FROM m WHERE ${FILTRO}`, parametros)).rows[0].n);
   const paginas = Math.max(1, Math.ceil(total / porPagina));
   const actual = Math.min(pagina, paginas);
@@ -81,6 +101,8 @@ export async function obtenerCajaFuerte(filtros: FiltrosCajaFuerte = {}) {
   const fijo = (v: unknown) => new Decimal((v as string | null) ?? 0).toFixed(4);
   return {
     caja,
+    cajaMovimientos,
+    cajas: cajas.rows.map((c) => ({ id: c.id as number, nombre: c.nombre as string, tipo: c.tipo as string, esFuerte: c.id === caja.id, usd: fijo(c.usd), cop: fijo(c.cop), eur: fijo(c.eur) })),
     saldos: saldos.rows.map((s) => {
       const de = (tipo: string) => fijo(hoy.rows.find((h) => h.codigo === s.codigo && h.tipo === tipo)?.total);
       return { codigo: s.codigo as CodigoMoneda, decimales: Number(s.decimales), monto: fijo(s.monto), entroHoy: de("INGRESO"), salioHoy: de("EGRESO") };

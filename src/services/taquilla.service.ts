@@ -54,7 +54,7 @@ async function monedasDeTaquilla(db: { query: PoolClient["query"] } = pool) {
 const SELECT_SOLICITUD = `
   SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, mc.cantidad_base, mc.tasa, mc.comision_descontada, mc.cuenta_destino,
          mc.estado_confirmacion, (mc.comprobante_key IS NOT NULL) AS tiene_comprobante,
-         mc.pagado_en, mc.pagado_medio, up.nombre AS pagado_por_nombre, ur.nombre AS registrado_por_nombre,
+         mc.pagado_en, mc.pagado_medio, mc.pagado_caja_id, cp.nombre AS pagado_caja_nombre, up.nombre AS pagado_por_nombre, ur.nombre AS registrado_por_nombre,
          cc.id AS cuenta_id, cc.referencia AS cliente_referencia, m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,
          ch.nombre AS canal_nombre,
          t.nombre AS cliente_nombre, t.telefono AS cliente_telefono, t.identificacion AS cliente_cedula
@@ -65,6 +65,7 @@ const SELECT_SOLICITUD = `
   JOIN terceros t ON t.id = cc.tercero_id
   JOIN usuarios ur ON ur.id = mc.usuario_id
   LEFT JOIN usuarios up ON up.id = mc.pagado_por
+  LEFT JOIN cajas cp ON cp.id = mc.pagado_caja_id
   WHERE cc.modulo = 'CAJA' AND NOT mc.anulado AND mc.monto > 0 AND mc.reverso_de_id IS NULL`;
 
 /**
@@ -159,6 +160,36 @@ export async function obtenerTaquilla() {
     pendientes: pendientes.rows,
     pagadasHoy: pagadas.rows,
   };
+}
+
+/**
+ * Solicitudes ya pagadas que coinciden con lo buscado (referencia, nombre, cédula o teléfono), en cualquiera de las
+ * dos taquillas y de cualquier día. Es la protección entre taquillas: si alguien viene a retirar una referencia
+ * que ya se pagó en la otra, acá sale dónde, cuándo y quién la pagó.
+ */
+export async function buscarSolicitudesPagadas(texto: string) {
+  const q = texto.trim();
+  if (q.length < 3) return [];
+  const r = await pool.query(
+    `${SELECT_SOLICITUD} AND mc.pagado_en IS NOT NULL
+       AND position(lower($1) in lower(concat_ws(' ', t.nombre, t.telefono, t.identificacion, mc.descripcion, cc.referencia))) > 0
+     ORDER BY mc.pagado_en DESC LIMIT 15`,
+    [q]
+  );
+  return r.rows;
+}
+
+/** "Esa solicitud ya se pagó en Taquilla 1 el 06/10 3:15 p. m.": dónde y cuándo se pagó, para el que intenta pagarla otra vez. */
+async function mensajeYaPagada(movimientoId: number) {
+  const r = await pool.query(
+    `SELECT mc.pagado_en, mc.pagado_medio, c.nombre AS caja, u.nombre AS usuario
+     FROM movimientos_cuenta_corriente mc LEFT JOIN cajas c ON c.id = mc.pagado_caja_id LEFT JOIN usuarios u ON u.id = mc.pagado_por WHERE mc.id = $1`,
+    [movimientoId]
+  );
+  const p = r.rows[0];
+  if (!p?.pagado_en) return "Esa solicitud ya se pagó";
+  const cuando = new Date(p.pagado_en).toLocaleString("es-CO", { timeZone: ZONA, day: "2-digit", month: "2-digit", hour: "numeric", minute: "2-digit" });
+  return `Esa solicitud ya se pagó${p.caja ? ` en ${p.caja}` : ""}${p.pagado_medio === "BANCOLOMBIA" ? " por Bancolombia" : ""} el ${cuando}${p.usuario ? ` (${p.usuario})` : ""}: no se puede retirar otra vez`;
 }
 
 /** Deja el saldo de la caja en `nuevo` y anota el movimiento por la diferencia. */
@@ -391,7 +422,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
   );
   const p = previa.rows[0];
   if (!p) throw errorHttp("Solicitud no encontrada", 404);
-  if (p.pagado_en) throw errorHttp("Esa solicitud ya se pagó", 409);
+  if (p.pagado_en) throw errorHttp(await mensajeYaPagada(movimientoId), 409);
   if (p.estado_confirmacion === "EN_PROCESO") throw errorHttp("Esa transferencia todavía no está confirmada: se confirma en Confirmaciones y después se paga", 409);
   if (enEfectivo) {
     if (!(MONEDAS_TAQUILLA as readonly string[]).includes(p.moneda_codigo)) {
@@ -409,7 +440,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
     [movimientoId, usuarioId, medio, caja.id]
   );
   const s = apartada.rows[0];
-  if (!s) throw errorHttp("Esa solicitud ya se pagó", 409);
+  if (!s) throw errorHttp(await mensajeYaPagada(movimientoId), 409);
 
   try {
     const referencia = String(s.descripcion ?? "").split(" · ")[1];

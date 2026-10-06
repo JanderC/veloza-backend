@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import {
   abrirSesionTaquilla,
   anularOperacionTaquilla,
+  buscarSolicitudesPagadas,
   cerrarSesionTaquilla,
   confirmarOperacionTaquilla,
   crearOperacionTaquilla,
@@ -69,6 +70,15 @@ taquillaRouter.post("/caja-fuerte", requireAuth, ROLES, async (req, res, next) =
   try {
     const datos = z.object({ monedaCodigo: z.enum(["COP", "USD", "EUR"]), monto: z.string(), sentido: z.enum(["TRAER", "ENVIAR"]) }).parse(req.body);
     res.status(201).json(await t(req, () => moverConCajaFuerte({ ...datos, usuarioId: req.user!.id })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Solicitudes ya pagadas que coinciden con lo buscado, en cualquiera de las dos taquillas
+taquillaRouter.get("/solicitudes/pagadas", requireAuth, ROLES, async (req, res, next) => {
+  try {
+    res.json(await buscarSolicitudesPagadas(String(req.query.q ?? "")));
   } catch (err) {
     next(err);
   }

@@ -89,7 +89,7 @@ taquillaRouter.post("/solicitudes/:id/pagar", requireAuth, ROLES, async (req, re
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
-    const { medio } = z.object({ medio: z.enum(["EFECTIVO", "BANCOLOMBIA"]).default("EFECTIVO") }).parse(req.body ?? {});
+    const { medio } = z.object({ medio: z.enum(["EFECTIVO", "BANCOLOMBIA", "OTROS"]).default("EFECTIVO") }).parse(req.body ?? {});
     res.json(await t(req, () => pagarSolicitud(id, req.user!.id, medio)));
   } catch (err) {
     next(err);
@@ -107,7 +107,7 @@ const operacionSchema = z.object({
   monedaResultado: z.string().min(2).max(10),
   cajaLado: z.enum(["MONTO", "RESULTADO", "AMBOS"]),
   resultado: z.string().optional(),
-  medio: z.enum(["EFECTIVO", "BANCOLOMBIA"]).optional(),
+  medio: z.enum(["EFECTIVO", "BANCOLOMBIA", "OTROS"]).optional(),
   descripcion: z.string().max(1000).optional(), // varias líneas: es el mensaje que se le envía al cliente
   clienteNombre: z.string().max(120).optional(),
   clienteTelefono: z.string().max(40).optional(),

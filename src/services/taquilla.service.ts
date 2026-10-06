@@ -137,9 +137,13 @@ export async function obtenerTaquilla() {
   );
 
   // Pagos hechos por Bancolombia en el mismo período: cuántos y cuánto. No tocan la caja.
-  const porBanco = pagadas.rows.filter((s) => s.pagado_medio === "BANCOLOMBIA");
-  const totalesBanco = new Map<string, Decimal>();
-  for (const s of porBanco) totalesBanco.set(s.moneda_codigo, (totalesBanco.get(s.moneda_codigo) ?? new Decimal(0)).plus(s.monto));
+  // Lo mismo los pagados por otros métodos.
+  const resumenDe = (medio: string) => {
+    const filas = pagadas.rows.filter((s) => s.pagado_medio === medio);
+    const totales = new Map<string, Decimal>();
+    for (const s of filas) totales.set(s.moneda_codigo, (totales.get(s.moneda_codigo) ?? new Decimal(0)).plus(s.monto));
+    return { cantidad: filas.length, totales: [...totales.entries()].map(([codigo, total]) => ({ codigo, total: total.toFixed(4) })) };
+  };
 
   // La Caja Fuerte alimenta a la taquilla y recibe lo que queda al cerrar: se muestra cuánto tiene
   const fuerte = await cajaFuerte();
@@ -151,7 +155,8 @@ export async function obtenerTaquilla() {
       saldos: monedas.map((m) => ({ codigo: m.codigo, monto: new Decimal(saldosFuerte.rows.find((s) => s.moneda_id === m.id)?.monto ?? 0).toFixed(4) })),
     },
     operaciones: operaciones.rows,
-    pagosBancolombia: { cantidad: porBanco.length, totales: [...totalesBanco.entries()].map(([codigo, total]) => ({ codigo, total: total.toFixed(4) })) },
+    pagosBancolombia: resumenDe("BANCOLOMBIA"),
+    pagosOtros: resumenDe("OTROS"),
     caja: { ...caja, saldos: porMoneda },
     sesion: { abierta, abierta_en: abiertaEn, abierta_por: abierta ? (turnos.rows[0].usuario_nombre as string) : null },
     ultimoCierre: ultimo.rows.length
@@ -189,7 +194,7 @@ async function mensajeYaPagada(movimientoId: number) {
   const p = r.rows[0];
   if (!p?.pagado_en) return "Esa solicitud ya se pagó";
   const cuando = new Date(p.pagado_en).toLocaleString("es-CO", { timeZone: ZONA, day: "2-digit", month: "2-digit", hour: "numeric", minute: "2-digit" });
-  return `Esa solicitud ya se pagó${p.caja ? ` en ${p.caja}` : ""}${p.pagado_medio === "BANCOLOMBIA" ? " por Bancolombia" : ""} el ${cuando}${p.usuario ? ` (${p.usuario})` : ""}: no se puede retirar otra vez`;
+  return `Esa solicitud ya se pagó${p.caja ? ` en ${p.caja}` : ""}${p.pagado_medio === "BANCOLOMBIA" ? " por Bancolombia" : p.pagado_medio === "OTROS" ? " por otros métodos" : ""} el ${cuando}${p.usuario ? ` (${p.usuario})` : ""}: no se puede retirar otra vez`;
 }
 
 /** Deja el saldo de la caja en `nuevo` y anota el movimiento por la diferencia. */
@@ -409,9 +414,10 @@ export async function moverCajaTaquilla(input: { monedaCodigo: string; monto: st
  * "Se pagó": al cliente se le entrega lo suyo y su cuenta queda saldada (se registra el pago en su hoja).
  *   EFECTIVO:    sale de la caja de taquilla (tiene que estar abierta y tener con qué).
  *   BANCOLOMBIA: se le transfirió; no toca la caja, solo queda contado como pago por Bancolombia.
+ *   OTROS:       se le pagó por otro método; tampoco toca la caja, queda contado como pago por otros métodos.
  * Una solicitud no se paga dos veces, ni antes de que esté confirmada.
  */
-export async function pagarSolicitud(movimientoId: number, usuarioId: number, medio: "EFECTIVO" | "BANCOLOMBIA" = "EFECTIVO") {
+export async function pagarSolicitud(movimientoId: number, usuarioId: number, medio: "EFECTIVO" | "BANCOLOMBIA" | "OTROS" = "EFECTIVO") {
   const enEfectivo = medio === "EFECTIVO";
   const caja = await cajaDeTaquilla();
   const previa = await pool.query(
@@ -450,7 +456,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
       monedaId: s.moneda_id,
       tipo: "ABONO",
       monto: new Decimal(s.monto).negated().toFixed(4),
-      descripcion: `${enEfectivo ? `Pago en ${caja.nombre.toLowerCase()}` : "Pago por Bancolombia"}${referencia ? ` · ${referencia}` : ""}`,
+      descripcion: `${enEfectivo ? `Pago en ${caja.nombre.toLowerCase()}` : medio === "OTROS" ? "Pago por otros métodos" : "Pago por Bancolombia"}${referencia ? ` · ${referencia}` : ""}`,
       usuarioId,
       // en efectivo sale de la caja de taquilla, en la moneda de la cuenta del cliente; por Bancolombia la caja no se toca
       ...(enEfectivo ? { cajaId: caja.id, montoCaja: new Decimal(s.monto).negated().toFixed(4), monedaCajaId: s.moneda_id } : {}),
@@ -495,7 +501,7 @@ interface OperacionInput {
   cajaLado: "MONTO" | "RESULTADO" | "AMBOS";
   // el resultado ya calculado, cuando la cuenta no es una sola tasa (ej. dólares por denominación de billete)
   resultado?: string;
-  medio?: "EFECTIVO" | "BANCOLOMBIA"; // por Bancolombia es transferencia: no mueve la caja
+  medio?: "EFECTIVO" | "BANCOLOMBIA" | "OTROS"; // por Bancolombia o por otros métodos no mueve la caja
   descripcion?: string;
   clienteNombre?: string;
   clienteTelefono?: string;

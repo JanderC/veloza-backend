@@ -119,7 +119,7 @@ export async function registrarMovimientoCajaFuerte(input: { tipo: "INGRESO" | "
   }
   if (!monto.isFinite() || !monto.isPositive()) throw errorHttp("El monto tiene que ser mayor a cero", 400);
   const concepto = input.concepto.trim();
-  if (concepto.length < 3) throw errorHttp("Escribí el concepto: de dónde viene o a dónde va el dinero", 400);
+  if (concepto.length < 3) throw errorHttp("Escribí la referencia: de dónde viene o a dónde va el dinero", 400);
 
   const caja = await cajaFuerte();
   const moneda = (await pool.query(`SELECT id, codigo, decimales FROM monedas WHERE codigo = $1`, [input.monedaCodigo])).rows[0];

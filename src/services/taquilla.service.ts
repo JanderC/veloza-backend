@@ -2,6 +2,7 @@ import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
 import { registrarMovimientoCuentaCorriente } from "./cuentaCorriente.service";
+import { generarUrlTemporal, subirArchivo } from "./almacenamiento.service";
 
 const ZONA = "America/Bogota";
 // Lo que maneja la caja de taquilla: efectivo en pesos, dólares y euros
@@ -317,7 +318,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
 // ---------- Ingresos y egresos de ventanilla ----------
 const SELECT_OPERACION = `
   SELECT o.id, o.tipo, o.cantidad, o.tasa, o.comision_pct, o.divide, o.moneda_operacion, o.medio, o.resultado, o.moneda_resultado, o.caja_lado, o.total, o.descripcion, o.cliente_nombre, o.cliente_telefono, o.cliente_cedula,
-         o.estado, o.created_at, o.confirmado_en, m.codigo AS moneda_codigo, u.nombre AS usuario_nombre, uc.nombre AS confirmado_por_nombre
+         o.estado, o.created_at, o.confirmado_en, (o.comprobante_key IS NOT NULL) AS tiene_comprobante, m.codigo AS moneda_codigo, u.nombre AS usuario_nombre, uc.nombre AS confirmado_por_nombre
   FROM operaciones_taquilla o
   JOIN monedas m ON m.id = o.moneda_id
   JOIN usuarios u ON u.id = o.usuario_id
@@ -408,6 +409,7 @@ export async function crearOperacionTaquilla(input: OperacionInput) {
   const fuera = tocaCaja ? efectos.find((e) => !(MONEDAS_TAQUILLA as readonly string[]).includes(e.moneda.codigo)) : undefined;
   if (fuera) throw errorHttp(`La caja de taquilla solo maneja pesos, dólares y euros: no puede moverse en ${fuera.moneda.codigo}`, 400);
 
+  let operacionId = 0;
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -415,11 +417,11 @@ export async function crearOperacionTaquilla(input: OperacionInput) {
       // primero lo que entra, después lo que sale
       for (const e of [...efectos].sort((a, b) => b.delta.cmp(a.delta))) await aplicarACaja(client, caja.id, e.moneda.id, e.delta, input.usuarioId);
     }
-    await client.query(
+    const creada = await client.query(
       `INSERT INTO operaciones_taquilla
         (tipo, moneda_id, cantidad, tasa, comision_pct, total, descripcion, cliente_nombre, cliente_telefono, cliente_cedula, estado, usuario_id,
          confirmado_en, confirmado_por, moneda_operacion, divide, medio, resultado, moneda_resultado, caja_lado)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $13 THEN now() END, CASE WHEN $13 THEN $12::int END, $14, $15, $16, $17, $18, $19)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $13 THEN now() END, CASE WHEN $13 THEN $12::int END, $14, $15, $16, $17, $18, $19) RETURNING id`,
       [
         input.tipo, monedaCaja.id, cantidad.toFixed(4), tasa?.toFixed(8) ?? null, comision?.toFixed(4) ?? null, total.toFixed(4),
         input.descripcion?.trim() || null, input.clienteNombre?.trim() || null, input.clienteTelefono?.trim() || null, input.clienteCedula?.trim() || null,
@@ -427,6 +429,7 @@ export async function crearOperacionTaquilla(input: OperacionInput) {
         codigoOperacion, !!(input.dividir && tasa), medio, resultado.toFixed(4), codigoResultado, input.cajaLado,
       ]
     );
+    operacionId = creada.rows[0].id as number;
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
@@ -434,7 +437,8 @@ export async function crearOperacionTaquilla(input: OperacionInput) {
   } finally {
     client.release();
   }
-  return obtenerTaquilla();
+  // el id de la operación nueva, para poder guardarle la imagen del comprobante
+  return { ...(await obtenerTaquilla()), operacionId };
 }
 
 /** Confirmar un ingreso pendiente: recién ahí suma a la caja. */
@@ -479,4 +483,20 @@ export async function anularOperacionTaquilla(id: number) {
   const r = await pool.query(`UPDATE operaciones_taquilla SET estado = 'ANULADA' WHERE id = $1 AND estado = 'PENDIENTE' RETURNING id`, [id]);
   if (!r.rows[0]) throw errorHttp("Solo se puede anular una operación que siga pendiente", 409);
   return obtenerTaquilla();
+}
+
+/** Guarda la imagen del comprobante con el ingreso o egreso de taquilla. */
+export async function guardarComprobanteOperacion(id: number, imagen: Buffer, mime: string) {
+  const existe = await pool.query(`SELECT id FROM operaciones_taquilla WHERE id = $1`, [id]);
+  if (!existe.rows[0]) throw errorHttp("Operación no encontrada", 404);
+  const key = await subirArchivo("comprobantes-taquilla", `op-${id}-${Date.now()}`, imagen, mime);
+  await pool.query(`UPDATE operaciones_taquilla SET comprobante_key = $1, comprobante_mime = $2 WHERE id = $3`, [key, mime, id]);
+  return obtenerTaquilla();
+}
+
+/** Enlace temporal (unos minutos) para ver la imagen del comprobante de una operación. */
+export async function urlComprobanteOperacion(id: number) {
+  const r = await pool.query(`SELECT comprobante_key, comprobante_mime FROM operaciones_taquilla WHERE id = $1`, [id]);
+  if (!r.rows[0]?.comprobante_key) throw errorHttp("Esa operación no tiene imagen de comprobante", 404);
+  return { url: generarUrlTemporal(r.rows[0].comprobante_key, r.rows[0].comprobante_mime, 600) };
 }

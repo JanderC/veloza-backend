@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import multer from "multer";
 import { requireAuth, requireRole } from "../middleware/auth";
 import {
   abrirSesionTaquilla,
@@ -7,9 +8,11 @@ import {
   cerrarSesionTaquilla,
   confirmarOperacionTaquilla,
   crearOperacionTaquilla,
+  guardarComprobanteOperacion,
   moverCajaTaquilla,
   obtenerTaquilla,
   pagarSolicitud,
+  urlComprobanteOperacion,
 } from "../services/taquilla.service";
 
 export const taquillaRouter = Router();
@@ -110,6 +113,31 @@ taquillaRouter.post("/operaciones/:id/anular", requireAuth, ROLES, async (req, r
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
     res.json(await anularOperacionTaquilla(id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// La imagen del comprobante de un ingreso o egreso: guardarla y verla
+const subida = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+taquillaRouter.post("/operaciones/:id/comprobante", requireAuth, ROLES, subida.single("imagen"), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    if (!req.file) return res.status(400).json({ error: "Adjuntá la imagen del comprobante" });
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(req.file.mimetype)) return res.status(400).json({ error: "El comprobante tiene que ser una imagen (JPG, PNG o WebP)" });
+    res.status(201).json(await guardarComprobanteOperacion(id, req.file.buffer, req.file.mimetype));
+  } catch (err) {
+    next(err);
+  }
+});
+
+taquillaRouter.get("/operaciones/:id/comprobante", requireAuth, ROLES, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    res.json(await urlComprobanteOperacion(id));
   } catch (err) {
     next(err);
   }

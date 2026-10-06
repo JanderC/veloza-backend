@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { z } from "zod";
 import multer from "multer";
 import { requireAuth, requireRole } from "../middleware/auth";
@@ -8,6 +8,7 @@ import {
   cerrarSesionTaquilla,
   confirmarOperacionTaquilla,
   crearOperacionTaquilla,
+  enTaquilla,
   moverConCajaFuerte,
   guardarComprobanteOperacion,
   moverCajaTaquilla,
@@ -16,14 +17,18 @@ import {
   urlComprobanteOperacion,
 } from "../services/taquilla.service";
 
+// El mismo router atiende las dos taquillas: montado en /taquilla es la 1 y en /taquilla-2 la 2.
 export const taquillaRouter = Router();
+function t<T>(req: Request, fn: () => Promise<T>) {
+  return enTaquilla(req.baseUrl.endsWith("/taquilla-2") ? 2 : 1, fn);
+}
 const ROLES = requireRole("ADMIN", "ASESOR", "CAJERO");
 const porMoneda = z.object({ COP: z.string().optional(), USD: z.string().optional(), EUR: z.string().optional() });
 
 // La caja con su sesión, las solicitudes por pagar, las pagadas y el último cuadre
-taquillaRouter.get("/", requireAuth, ROLES, async (_req, res, next) => {
+taquillaRouter.get("/", requireAuth, ROLES, async (req, res, next) => {
   try {
-    res.json(await obtenerTaquilla());
+    res.json(await t(req, () => obtenerTaquilla()));
   } catch (err) {
     next(err);
   }
@@ -33,7 +38,7 @@ taquillaRouter.get("/", requireAuth, ROLES, async (_req, res, next) => {
 taquillaRouter.post("/sesion/abrir", requireAuth, ROLES, async (req, res, next) => {
   try {
     const { montos, desdeCajaFuerte } = z.object({ montos: porMoneda, desdeCajaFuerte: z.boolean().optional() }).parse(req.body);
-    res.status(201).json(await abrirSesionTaquilla({ montos, desdeCajaFuerte, usuarioId: req.user!.id }));
+    res.status(201).json(await t(req, () => abrirSesionTaquilla({ montos, desdeCajaFuerte, usuarioId: req.user!.id })));
   } catch (err) {
     next(err);
   }
@@ -43,7 +48,7 @@ taquillaRouter.post("/sesion/abrir", requireAuth, ROLES, async (req, res, next) 
 taquillaRouter.post("/sesion/cerrar", requireAuth, ROLES, async (req, res, next) => {
   try {
     const { contado } = z.object({ contado: porMoneda }).parse(req.body);
-    res.json(await cerrarSesionTaquilla({ contado, usuarioId: req.user!.id }));
+    res.json(await t(req, () => cerrarSesionTaquilla({ contado, usuarioId: req.user!.id })));
   } catch (err) {
     next(err);
   }
@@ -53,7 +58,7 @@ taquillaRouter.post("/sesion/cerrar", requireAuth, ROLES, async (req, res, next)
 taquillaRouter.post("/caja", requireAuth, ROLES, async (req, res, next) => {
   try {
     const datos = z.object({ monedaCodigo: z.enum(["COP", "USD", "EUR"]), monto: z.string() }).parse(req.body);
-    res.status(201).json(await moverCajaTaquilla({ ...datos, usuarioId: req.user!.id }));
+    res.status(201).json(await t(req, () => moverCajaTaquilla({ ...datos, usuarioId: req.user!.id })));
   } catch (err) {
     next(err);
   }
@@ -63,7 +68,7 @@ taquillaRouter.post("/caja", requireAuth, ROLES, async (req, res, next) => {
 taquillaRouter.post("/caja-fuerte", requireAuth, ROLES, async (req, res, next) => {
   try {
     const datos = z.object({ monedaCodigo: z.enum(["COP", "USD", "EUR"]), monto: z.string(), sentido: z.enum(["TRAER", "ENVIAR"]) }).parse(req.body);
-    res.status(201).json(await moverConCajaFuerte({ ...datos, usuarioId: req.user!.id }));
+    res.status(201).json(await t(req, () => moverConCajaFuerte({ ...datos, usuarioId: req.user!.id })));
   } catch (err) {
     next(err);
   }
@@ -75,7 +80,7 @@ taquillaRouter.post("/solicitudes/:id/pagar", requireAuth, ROLES, async (req, re
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
     const { medio } = z.object({ medio: z.enum(["EFECTIVO", "BANCOLOMBIA"]).default("EFECTIVO") }).parse(req.body ?? {});
-    res.json(await pagarSolicitud(id, req.user!.id, medio));
+    res.json(await t(req, () => pagarSolicitud(id, req.user!.id, medio)));
   } catch (err) {
     next(err);
   }
@@ -102,7 +107,7 @@ const operacionSchema = z.object({
 
 taquillaRouter.post("/operaciones", requireAuth, ROLES, async (req, res, next) => {
   try {
-    res.status(201).json(await crearOperacionTaquilla({ ...operacionSchema.parse(req.body), usuarioId: req.user!.id }));
+    res.status(201).json(await t(req, () => crearOperacionTaquilla({ ...operacionSchema.parse(req.body), usuarioId: req.user!.id })));
   } catch (err) {
     next(err);
   }
@@ -113,7 +118,7 @@ taquillaRouter.post("/operaciones/:id/confirmar", requireAuth, ROLES, async (req
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
-    res.json(await confirmarOperacionTaquilla(id, req.user!.id));
+    res.json(await t(req, () => confirmarOperacionTaquilla(id, req.user!.id)));
   } catch (err) {
     next(err);
   }
@@ -123,7 +128,7 @@ taquillaRouter.post("/operaciones/:id/anular", requireAuth, ROLES, async (req, r
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
-    res.json(await anularOperacionTaquilla(id));
+    res.json(await t(req, () => anularOperacionTaquilla(id)));
   } catch (err) {
     next(err);
   }
@@ -138,7 +143,8 @@ taquillaRouter.post("/operaciones/:id/comprobante", requireAuth, ROLES, subida.s
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
     if (!req.file) return res.status(400).json({ error: "Adjuntá la imagen del comprobante" });
     if (!/^image\/(jpeg|png|webp|gif)$/.test(req.file.mimetype)) return res.status(400).json({ error: "El comprobante tiene que ser una imagen (JPG, PNG o WebP)" });
-    res.status(201).json(await guardarComprobanteOperacion(id, req.file.buffer, req.file.mimetype));
+    const { buffer, mimetype } = req.file;
+    res.status(201).json(await t(req, () => guardarComprobanteOperacion(id, buffer, mimetype)));
   } catch (err) {
     next(err);
   }
@@ -148,7 +154,7 @@ taquillaRouter.get("/operaciones/:id/comprobante", requireAuth, ROLES, async (re
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
-    res.json(await urlComprobanteOperacion(id));
+    res.json(await t(req, () => urlComprobanteOperacion(id)));
   } catch (err) {
     next(err);
   }

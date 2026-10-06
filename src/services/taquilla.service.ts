@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "async_hooks";
 import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
@@ -25,9 +26,17 @@ function aDecimal(valor: string | undefined, campo: string) {
   }
 }
 
+// Hay dos taquillas (1 y 2) que trabajan igual, cada una con su caja. Todo lo de este archivo corre
+// para la taquilla que eligió la ruta (/taquilla o /taquilla-2); sin contexto es la 1.
+const taquillaActual = new AsyncLocalStorage<number>();
+export function enTaquilla<T>(numero: number, fn: () => Promise<T>) {
+  return taquillaActual.run(numero, fn);
+}
+
 async function cajaDeTaquilla() {
-  const r = await pool.query(`SELECT id, nombre FROM cajas WHERE es_taquilla AND activo ORDER BY id LIMIT 1`);
-  if (!r.rows[0]) throw errorHttp("No hay una caja de taquilla configurada", 409);
+  const numero = taquillaActual.getStore() ?? 1;
+  const r = await pool.query(`SELECT id, nombre FROM cajas WHERE taquilla_numero = $1 AND activo`, [numero]);
+  if (!r.rows[0]) throw errorHttp(`No hay una caja configurada para la taquilla ${numero}`, 409);
   return r.rows[0] as { id: number; nombre: string };
 }
 
@@ -109,17 +118,21 @@ export async function obtenerTaquilla() {
   );
 
   const pendientes = await pool.query(`${SELECT_SOLICITUD} AND mc.pagado_en IS NULL ORDER BY mc.fecha, mc.id`);
-  // Pagadas: las de esta sesión de caja; con la caja cerrada, las de hoy
+  // Pagadas por esta taquilla: las de esta sesión de caja; con la caja cerrada, las de hoy.
+  // (Las por pagar se ven en las dos taquillas: la que la paga se la queda.)
   const pagadas = abierta
-    ? await pool.query(`${SELECT_SOLICITUD} AND mc.pagado_en >= $1 ORDER BY mc.pagado_en DESC`, [abiertaEn])
-    : await pool.query(`${SELECT_SOLICITUD} AND (mc.pagado_en AT TIME ZONE '${ZONA}')::date = (now() AT TIME ZONE '${ZONA}')::date ORDER BY mc.pagado_en DESC`);
+    ? await pool.query(`${SELECT_SOLICITUD} AND mc.pagado_caja_id = $1 AND mc.pagado_en >= $2 ORDER BY mc.pagado_en DESC`, [caja.id, abiertaEn])
+    : await pool.query(
+        `${SELECT_SOLICITUD} AND mc.pagado_caja_id = $1 AND (mc.pagado_en AT TIME ZONE '${ZONA}')::date = (now() AT TIME ZONE '${ZONA}')::date ORDER BY mc.pagado_en DESC`,
+        [caja.id]
+      );
 
   // Ingresos y egresos de ventanilla: los de esta sesión (o de hoy) y todo lo que siga pendiente de confirmar
   const operaciones = await pool.query(
     `${SELECT_OPERACION}
-     WHERE o.estado = 'PENDIENTE' OR ${abierta ? "o.created_at >= $1" : `(o.created_at AT TIME ZONE '${ZONA}')::date = (now() AT TIME ZONE '${ZONA}')::date`}
+     WHERE o.caja_id = $1 AND (o.estado = 'PENDIENTE' OR ${abierta ? "o.created_at >= $2" : `(o.created_at AT TIME ZONE '${ZONA}')::date = (now() AT TIME ZONE '${ZONA}')::date`})
      ORDER BY o.id DESC`,
-    abierta ? [abiertaEn] : []
+    abierta ? [caja.id, abiertaEn] : [caja.id]
   );
 
   // Pagos hechos por Bancolombia en el mismo período: cuántos y cuánto. No tocan la caja.
@@ -217,8 +230,8 @@ export async function abrirSesionTaquilla(input: { montos: Partial<Record<Codigo
         const saldo = await client.query(`SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2`, [caja.id, m.id]);
         const falta = inicial.minus(saldo.rows[0]?.monto ?? 0);
         const base = { monedaId: m.id, codigo: m.codigo, usuarioId: input.usuarioId };
-        if (falta.isPositive()) await pasarEntreCajas(client, { ...base, origen: fuerte, destino: caja, monto: falta, observacion: "Apertura de taquilla" });
-        else if (falta.isNegative()) await pasarEntreCajas(client, { ...base, origen: caja, destino: fuerte, monto: falta.abs(), observacion: "Apertura de taquilla: sobrante" });
+        if (falta.isPositive()) await pasarEntreCajas(client, { ...base, origen: fuerte, destino: caja, monto: falta, observacion: `Apertura de ${caja.nombre}` });
+        else if (falta.isNegative()) await pasarEntreCajas(client, { ...base, origen: caja, destino: fuerte, monto: falta.abs(), observacion: `Apertura de ${caja.nombre}: sobrante` });
       } else {
         await fijarSaldo(client, caja.id, m.id, inicial, input.usuarioId);
       }
@@ -266,7 +279,7 @@ export async function cerrarSesionTaquilla(input: { contado: Partial<Record<Codi
       const esperado = new Decimal(saldo.rows[0]?.monto ?? 0);
       // la caja queda en lo que de verdad se contó (la diferencia queda anotada) y eso pasa a la Caja Fuerte
       await fijarSaldo(client, caja.id, m.id, real, input.usuarioId);
-      await pasarEntreCajas(client, { origen: caja, destino: fuerte, monedaId: m.id, codigo: m.codigo, monto: real, usuarioId: input.usuarioId, observacion: "Cierre de taquilla" });
+      await pasarEntreCajas(client, { origen: caja, destino: fuerte, monedaId: m.id, codigo: m.codigo, monto: real, usuarioId: input.usuarioId, observacion: `Cierre de ${caja.nombre}` });
       await client.query(
         `UPDATE cierres_caja SET fecha_cierre = now(), saldo_esperado = $1, saldo_real = $2, diferencia = $3, estado = 'CERRADA' WHERE id = $4`,
         [esperado.toFixed(4), real.toFixed(4), real.minus(esperado).toFixed(4), turno.id]
@@ -304,7 +317,7 @@ export async function moverConCajaFuerte(input: { monedaCodigo: string; monto: s
       codigo: moneda.codigo,
       monto,
       usuarioId: input.usuarioId,
-      observacion: traer ? "Caja Fuerte alimenta a Taquilla" : "Taquilla envía a Caja Fuerte",
+      observacion: traer ? `Caja Fuerte alimenta a ${caja.nombre}` : `${caja.nombre} envía a Caja Fuerte`,
     });
     await client.query("COMMIT");
   } catch (err) {
@@ -389,11 +402,11 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
 
   // Se aparta primero: si dos personas tocan "Se pagó" a la vez, solo una sigue
   const apartada = await pool.query(
-    `UPDATE movimientos_cuenta_corriente mc SET pagado_en = now(), pagado_por = $2, pagado_medio = $3
+    `UPDATE movimientos_cuenta_corriente mc SET pagado_en = now(), pagado_por = $2, pagado_medio = $3, pagado_caja_id = $4
      FROM cuentas_corrientes cc
      WHERE mc.id = $1 AND cc.id = mc.cuenta_corriente_id AND mc.pagado_en IS NULL AND NOT mc.anulado
      RETURNING mc.id, mc.monto, mc.descripcion, cc.tercero_id, cc.canal_id, cc.moneda_id`,
-    [movimientoId, usuarioId, medio]
+    [movimientoId, usuarioId, medio, caja.id]
   );
   const s = apartada.rows[0];
   if (!s) throw errorHttp("Esa solicitud ya se pagó", 409);
@@ -406,7 +419,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
       monedaId: s.moneda_id,
       tipo: "ABONO",
       monto: new Decimal(s.monto).negated().toFixed(4),
-      descripcion: `${enEfectivo ? "Pago en taquilla" : "Pago por Bancolombia"}${referencia ? ` · ${referencia}` : ""}`,
+      descripcion: `${enEfectivo ? `Pago en ${caja.nombre.toLowerCase()}` : "Pago por Bancolombia"}${referencia ? ` · ${referencia}` : ""}`,
       usuarioId,
       // en efectivo sale de la caja de taquilla, en la moneda de la cuenta del cliente; por Bancolombia la caja no se toca
       ...(enEfectivo ? { cajaId: caja.id, montoCaja: new Decimal(s.monto).negated().toFixed(4), monedaCajaId: s.moneda_id } : {}),
@@ -414,7 +427,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
     await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_movimiento_id = $1 WHERE id = $2`, [pago.movimiento.id, movimientoId]);
   } catch (err) {
     // no se pudo pagar (p. ej. la caja no tiene tanto): la solicitud vuelve a quedar por pagar
-    await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_en = NULL, pagado_por = NULL, pagado_medio = NULL WHERE id = $1`, [movimientoId]);
+    await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_en = NULL, pagado_por = NULL, pagado_medio = NULL, pagado_caja_id = NULL WHERE id = $1`, [movimientoId]);
     throw err;
   }
   return obtenerTaquilla();
@@ -524,13 +537,13 @@ export async function crearOperacionTaquilla(input: OperacionInput) {
     const creada = await client.query(
       `INSERT INTO operaciones_taquilla
         (tipo, moneda_id, cantidad, tasa, comision_pct, total, descripcion, cliente_nombre, cliente_telefono, cliente_cedula, estado, usuario_id,
-         confirmado_en, confirmado_por, moneda_operacion, divide, medio, resultado, moneda_resultado, caja_lado)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $13 THEN now() END, CASE WHEN $13 THEN $12::int END, $14, $15, $16, $17, $18, $19) RETURNING id`,
+         confirmado_en, confirmado_por, moneda_operacion, divide, medio, resultado, moneda_resultado, caja_lado, caja_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CASE WHEN $13 THEN now() END, CASE WHEN $13 THEN $12::int END, $14, $15, $16, $17, $18, $19, $20) RETURNING id`,
       [
         input.tipo, monedaCaja.id, cantidad.toFixed(4), tasa?.toFixed(8) ?? null, comision?.toFixed(4) ?? null, total.toFixed(4),
         input.descripcion?.trim() || null, input.clienteNombre?.trim() || null, input.clienteTelefono?.trim() || null, input.clienteCedula?.trim() || null,
         aplica ? "CONFIRMADA" : "PENDIENTE", input.usuarioId, aplica,
-        codigoOperacion, !!(input.dividir && tasa), medio, resultado.toFixed(4), codigoResultado, input.cajaLado,
+        codigoOperacion, !!(input.dividir && tasa), medio, resultado.toFixed(4), codigoResultado, input.cajaLado, caja.id,
       ]
     );
     operacionId = creada.rows[0].id as number;
@@ -551,7 +564,7 @@ export async function confirmarOperacionTaquilla(id: number, usuarioId: number) 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const r = await client.query(`SELECT * FROM operaciones_taquilla WHERE id = $1 FOR UPDATE`, [id]);
+    const r = await client.query(`SELECT * FROM operaciones_taquilla WHERE id = $1 AND caja_id = $2 FOR UPDATE`, [id, caja.id]);
     const o = r.rows[0];
     if (!o) throw errorHttp("Operación no encontrada", 404);
     if (o.estado !== "PENDIENTE") throw errorHttp("Esa operación ya no está pendiente", 409);
@@ -584,7 +597,8 @@ export async function confirmarOperacionTaquilla(id: number, usuarioId: number) 
 
 /** Descartar un ingreso pendiente (todavía no había tocado la caja). */
 export async function anularOperacionTaquilla(id: number) {
-  const r = await pool.query(`UPDATE operaciones_taquilla SET estado = 'ANULADA' WHERE id = $1 AND estado = 'PENDIENTE' RETURNING id`, [id]);
+  const caja = await cajaDeTaquilla();
+  const r = await pool.query(`UPDATE operaciones_taquilla SET estado = 'ANULADA' WHERE id = $1 AND caja_id = $2 AND estado = 'PENDIENTE' RETURNING id`, [id, caja.id]);
   if (!r.rows[0]) throw errorHttp("Solo se puede anular una operación que siga pendiente", 409);
   return obtenerTaquilla();
 }

@@ -36,3 +36,4 @@ router.use("/metodos-pago", metodosPagoRouter);
 router.use("/usuarios", usuariosRouter);
 router.use("/whatsapp", whatsappRouter);
 router.use("/taquilla", taquillaRouter);
+router.use("/taquilla-2", taquillaRouter);

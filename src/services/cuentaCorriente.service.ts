@@ -561,9 +561,12 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
   const saldoAnterior = new Decimal(anterior.rows[0].saldo);
   let sumas = new Decimal(0);
   let abonos = new Decimal(0);
+  // lo que el cliente envió en el período: la cantidad de cada compra, antes de tasa o comisión
+  let enviado = new Decimal(0);
   for (const m of r.rows) {
     if (m.anulado) continue; // un movimiento y su reverso se cancelan: no ensucian las sumas
     const monto = new Decimal(m.monto);
+    if (monto.isPositive() && m.cantidad_base != null) enviado = enviado.plus(new Decimal(m.cantidad_base).abs());
     if (monto.isPositive()) sumas = sumas.plus(monto);
     else abonos = abonos.plus(monto);
   }
@@ -580,9 +583,20 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
           )
         ).rows[0] ?? null
       : null;
+  // Lo enviado por el cliente en toda la historia de la cuenta, y cuánto de eso todavía no se le pagó
+  const envios = await pool.query(
+    `SELECT COALESCE(sum(abs(cantidad_base)), 0) AS total,
+            COALESCE(sum(abs(cantidad_base)) FILTER (WHERE pagado_en IS NULL), 0) AS por_pagar
+     FROM movimientos_cuenta_corriente
+     WHERE cuenta_corriente_id = $1 AND NOT anulado AND reverso_de_id IS NULL AND monto > 0 AND cantidad_base IS NOT NULL`,
+    [id]
+  );
   return {
     cuenta,
     cierre,
+    enviado: enviado.toFixed(4),
+    enviadoTotal: new Decimal(envios.rows[0].total).toFixed(4),
+    enviadoPorPagar: new Decimal(envios.rows[0].por_pagar).toFixed(4),
     saldoAnterior: saldoAnterior.toFixed(4),
     movimientos: r.rows,
     sumas: sumas.toFixed(4),

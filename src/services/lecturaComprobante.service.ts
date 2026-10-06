@@ -78,11 +78,35 @@ const INSTRUCCIONES = [
 // Si Groq rechaza la clave o la red del servidor (401/403), no se insiste en cada comprobante: se deja de intentar
 // un rato y la pantalla lee la imagen por su cuenta.
 let groqPausadoHasta = 0;
+// El modelo que ya respondió bien se prueba primero la próxima vez
+let modeloQueFunciona: string | null = null;
+
+/** Los modelos de visión que ofrece la cuenta de Groq, por si los que vienen por defecto fueron dados de baja. */
+async function modelosDeVisionDeGroq(clave: string): Promise<string[]> {
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/models", { headers: { Authorization: `Bearer ${clave}` }, signal: AbortSignal.timeout(8_000) });
+    if (!res.ok) return [];
+    const ids = ((await res.json()) as { data?: { id: string }[] }).data?.map((m) => m.id) ?? [];
+    return ids.filter((id) => /vision|llama-4|scout|maverick|llava|pixtral|qwen.*vl/i.test(id) && !/guard|whisper|tts/i.test(id));
+  } catch {
+    return [];
+  }
+}
 
 async function leerConGroq(clave: string, imagen: Buffer, mime: string): Promise<Record<string, unknown>> {
   if (Date.now() < groqPausadoHasta) throw errorHttp("La lectura con IA no está disponible en este momento", 501);
   let ultimo = "sin respuesta";
-  for (const modelo of MODELOS_GROQ) {
+  const candidatos = [...new Set([modeloQueFunciona, ...MODELOS_GROQ].filter((m): m is string => !!m))];
+  let descubiertos = false;
+  for (let i = 0; i < candidatos.length || !descubiertos; i++) {
+    if (i >= candidatos.length) {
+      // ninguno de los conocidos sirvió: se le pregunta a Groq qué modelos de visión tiene la cuenta
+      descubiertos = true;
+      const nuevos = (await modelosDeVisionDeGroq(clave)).filter((m) => !candidatos.includes(m)).slice(0, 3);
+      if (!nuevos.length) break;
+      candidatos.push(...nuevos);
+    }
+    const modelo = candidatos[i]!;
     let res: Response;
     try {
       res = await fetch(GROQ_URL, {
@@ -103,7 +127,7 @@ async function leerConGroq(clave: string, imagen: Buffer, mime: string): Promise
             },
           ],
         }),
-        signal: AbortSignal.timeout(25_000),
+        signal: AbortSignal.timeout(12_000),
       });
     } catch (e) {
       ultimo = (e as Error).message;
@@ -124,7 +148,10 @@ async function leerConGroq(clave: string, imagen: Buffer, mime: string): Promise
     try {
       const contenido = JSON.parse(cuerpo).choices?.[0]?.message?.content as string | undefined;
       const leido: unknown = JSON.parse(contenido ?? "");
-      if (leido && typeof leido === "object") return leido as Record<string, unknown>;
+      if (leido && typeof leido === "object") {
+        modeloQueFunciona = modelo;
+        return leido as Record<string, unknown>;
+      }
       ultimo = "la IA no devolvió datos";
     } catch {
       ultimo = "la IA no devolvió datos legibles";

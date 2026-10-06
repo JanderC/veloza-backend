@@ -37,6 +37,7 @@ interface RegistrarMovimientoCCInput {
   cuentaDestino?: string; // a qué cuenta del cliente se le pagó (opcional)
   // Comisión descontada del monto: la tasa viaja como factor (4% -> "0.96") y cantidad × factor = lo que queda
   comisionDescontada?: boolean;
+  comisionIncluida?: boolean; // el % ya venía sumado en lo enviado: la tasa es 1 / (1 + %)
   // Confirmación de la transferencia: entra ya confirmada, o pendiente hasta que se verifique (ej. Western Union)
   estadoConfirmacion?: "EN_PROCESO" | "CONFIRMADA";
 }
@@ -117,8 +118,8 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
 
         const movResult = await client.query(
       `INSERT INTO movimientos_cuenta_corriente
-        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje, cuenta_destino, comision_descontada, estado_confirmacion)
-       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15, $16, $17, $18)
+        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje, cuenta_destino, comision_descontada, estado_confirmacion, comision_incluida)
+       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15, $16, $17, $18, $19)
        RETURNING *`,
       [
         cuenta.id, input.fecha ?? null, input.descripcion ?? null, input.tipo,
@@ -129,6 +130,7 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
         input.cuentaDestino?.trim() || null,
         !!(input.comisionDescontada && tasa),
         input.reversoDeId ? null : (input.estadoConfirmacion ?? null),
+        !!(input.comisionDescontada && input.comisionIncluida && tasa),
       ]
     );
 
@@ -136,7 +138,8 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
     if (cuenta.formula == null && tasa && !input.reversoDeId) {
       if (input.comisionDescontada) {
         await client.query(`UPDATE cuentas_corrientes SET formula = 'COMISION', comision_pct = $1 WHERE id = $2`, [
-          new Decimal(1).minus(tasa).times(100).toFixed(4),
+          // el % del cliente: descontado es 1 - factor; ya sumado en lo enviado es 1/factor - 1
+          (input.comisionIncluida ? new Decimal(1).div(tasa).minus(1) : new Decimal(1).minus(tasa)).times(100).toFixed(4),
           cuenta.id,
         ]);
       } else if (!input.tasaEsPorcentaje) {
@@ -539,7 +542,7 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
        SELECT mc.*, sum(mc.monto) OVER (ORDER BY mc.fecha, mc.id) AS total
        FROM movimientos_cuenta_corriente mc WHERE mc.cuenta_corriente_id = $1
      )
-     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.comision_descontada, c.estado_confirmacion, (c.comprobante_key IS NOT NULL) AS tiene_comprobante, c.pagado_en, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
+     SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.comision_descontada, c.comision_incluida, c.estado_confirmacion, (c.comprobante_key IS NOT NULL) AS tiene_comprobante, c.pagado_en, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
             c.movimiento_caja_id, c.created_at, u.nombre AS usuario_nombre, mb.codigo AS moneda_base_codigo, cat.nombre AS categoria_nombre
      FROM corridos c
      JOIN usuarios u ON u.id = c.usuario_id
@@ -626,7 +629,14 @@ export async function generarExcelEstadoCuenta(id: number, filtros: { desde?: st
       `${m.descripcion ?? m.tipo}${m.cuenta_destino ? ` → ${m.cuenta_destino}` : ""}${m.anulado && !m.reverso_de_id ? " (anulado)" : ""}`,
       m.cantidad_base != null ? Number(m.cantidad_base) : null,
       // comisión descontada: se guarda el factor (0.96) y se muestra como -4%
-      m.comision_descontada && m.tasa != null ? `-${new Decimal(1).minus(m.tasa).times(100).toFixed()}%` : m.tasa != null ? Number(m.tasa) : null,
+      // (si el % ya venía sumado en lo enviado, el factor es 1/1,06 y se muestra como +6%)
+      m.comision_descontada && m.tasa != null
+        ? m.comision_incluida
+          ? `+${new Decimal(1).div(m.tasa).minus(1).times(100).toDecimalPlaces(3).toFixed()}%`
+          : `-${new Decimal(1).minus(m.tasa).times(100).toFixed()}%`
+        : m.tasa != null
+          ? Number(m.tasa)
+          : null,
       Number(m.monto),
       Number(m.total),
     ]);
@@ -757,6 +767,7 @@ export async function anularMovimiento(movimientoId: number, usuarioId: number) 
     tasa: m.cantidad_base != null && m.tasa != null ? new Decimal(m.tasa).toString() : undefined,
     tasaEsPorcentaje: m.tasa_es_porcentaje,
     comisionDescontada: m.comision_descontada,
+    comisionIncluida: m.comision_incluida,
     descripcion: `Reverso de: ${m.descripcion ?? m.tipo}`,
     fecha: new Date(m.fecha).toISOString(),
     usuarioId,

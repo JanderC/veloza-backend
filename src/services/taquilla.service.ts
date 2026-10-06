@@ -52,7 +52,7 @@ async function monedasDeTaquilla(db: { query: PoolClient["query"] } = pool) {
 // Todas las compras de Confirmaciones: lo que hay que entregarle al cliente en efectivo.
 // Las que Western todavía no confirmó también llegan, marcadas, y no se pueden pagar hasta que se confirmen.
 const SELECT_SOLICITUD = `
-  SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, mc.cantidad_base, mc.tasa, mc.comision_descontada, mc.cuenta_destino,
+  SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, mc.cantidad_base, mc.tasa, mc.comision_descontada, mc.comision_incluida, mc.cuenta_destino,
          mc.estado_confirmacion, (mc.comprobante_key IS NOT NULL) AS tiene_comprobante,
          mc.pagado_en, mc.pagado_medio, mc.pagado_caja_id, cp.nombre AS pagado_caja_nombre, up.nombre AS pagado_por_nombre, ur.nombre AS registrado_por_nombre,
          cc.id AS cuenta_id, cc.referencia AS cliente_referencia, m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,

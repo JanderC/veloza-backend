@@ -75,7 +75,12 @@ const INSTRUCCIONES = [
   '- "destinatario": el nombre de la persona que recibe ("A", "Para", "To", "Enviado a", "Inscrito como").',
 ].join("\n");
 
+// Si Groq rechaza la clave o la red del servidor (401/403), no se insiste en cada comprobante: se deja de intentar
+// un rato y la pantalla lee la imagen por su cuenta.
+let groqPausadoHasta = 0;
+
 async function leerConGroq(clave: string, imagen: Buffer, mime: string): Promise<Record<string, unknown>> {
+  if (Date.now() < groqPausadoHasta) throw errorHttp("La lectura con IA no está disponible en este momento", 501);
   let ultimo = "sin respuesta";
   for (const modelo of MODELOS_GROQ) {
     let res: Response;
@@ -109,6 +114,11 @@ async function leerConGroq(clave: string, imagen: Buffer, mime: string): Promise
       // modelo dado de baja o saturado: se prueba el siguiente
       ultimo = `Groq ${res.status}: ${cuerpo.slice(0, 200)}`;
       console.warn(`[comprobantes] falló ${modelo}: ${ultimo}`);
+      if (res.status === 401 || res.status === 403) {
+        // no es cosa del modelo: la clave no sirve o Groq no acepta conexiones desde esta red
+        groqPausadoHasta = Date.now() + 10 * 60_000;
+        throw errorHttp(`La IA rechazó la conexión (${res.status}): revisá GROQ_API_KEY y desde dónde se conecta el servidor`, 501);
+      }
       continue;
     }
     try {

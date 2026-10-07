@@ -691,7 +691,9 @@ export async function generarExcelEstadoCuenta(id: number, filtros: { desde?: st
       m.comision_descontada && m.tasa != null
         ? m.comision_incluida
           ? `+${new Decimal(1).div(m.tasa).minus(1).times(100).toDecimalPlaces(3).toFixed()}%`
-          : `-${new Decimal(1).minus(m.tasa).times(100).toFixed()}%`
+          : new Decimal(m.tasa).eq(1)
+            ? "sin comisión" // familiar o amigo
+            : `-${new Decimal(1).minus(m.tasa).times(100).toFixed()}%`
         : m.tasa != null
           ? Number(m.tasa)
           : null,

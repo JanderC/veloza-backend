@@ -275,7 +275,8 @@ cuentasCorrientesRouter.post("/movimientos/:id/confirmar", requireAuth, requireR
 cuentasCorrientesRouter.get("/movimientos/numero/:numero", requireAuth, async (req, res, next) => {
   try {
     const numero = z.string().regex(/^[A-Za-z0-9-]{4,40}$/).parse(req.params.numero);
-    res.json({ movimiento: await buscarMovimientoPorNumero(numero) });
+    // ?canalId=: solo dentro de ese medio de pago (Bancolombia, Nequi, Zelle…)
+    res.json({ movimiento: await buscarMovimientoPorNumero(numero, entero(req.query.canalId)) });
   } catch (err) {
     next(err);
   }

@@ -449,16 +449,20 @@ export async function eliminarCuentaCorriente(id: number) {
  * ("Abono Zelle · Juan 123456" o "Recibe Zelle · d1a1kat6i"), en todas las cuentas, sin contar los anulados.
  * La referencia puede tener letras: se compara completa, sin distinguir mayúsculas.
  */
-export async function buscarMovimientoPorNumero(numero: string) {
+export async function buscarMovimientoPorNumero(numero: string, canalId?: number) {
+  // El bloqueo es por medio de pago: la misma referencia puede existir en Bancolombia y en Nequi (cada banco numera
+  // por su cuenta), pero no dos veces en el mismo medio. Sin canal se busca en todos.
   const r = await pool.query(
-    `SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, t.nombre AS tercero_nombre
+    `SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, t.nombre AS tercero_nombre, ch.nombre AS canal_nombre
      FROM movimientos_cuenta_corriente mc
      JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+     JOIN canales_cuenta_corriente ch ON ch.id = cc.canal_id
      JOIN terceros t ON t.id = cc.tercero_id
      WHERE NOT mc.anulado AND position(' · ' in mc.descripcion) > 0
+       AND ($2::int IS NULL OR cc.canal_id = $2)
        AND regexp_replace(split_part(mc.descripcion, ' · ', 2), ' \([0-9.,]+ [A-Z]{3,5} a [0-9.,]+\)$', '') ~* ('(^|[^a-z0-9])' || $1 || '([^a-z0-9]|$)')
      ORDER BY mc.id DESC LIMIT 1`,
-    [numero]
+    [numero, canalId ?? null]
   );
   return r.rows[0] ?? null;
 }

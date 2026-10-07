@@ -11,7 +11,7 @@ import {
   MIME_PERMITIDOS,
 } from "../services/documentosTercero.service";
 
-// Montado en /terceros
+// Montado en /terceros.
 export const documentosTerceroRouter = Router();
 
 const TAMANO_MAXIMO_MB = 10;

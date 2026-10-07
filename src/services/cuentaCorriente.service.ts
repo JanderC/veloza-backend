@@ -246,6 +246,7 @@ interface CrearCuentaInput {
   tasaCobro?: string;
   modulo?: ModuloCuenta; // dónde se lleva: Cuentas Corrientes (por defecto), Cuentas por Cobrar o Cajas y Confirmaciones
   referencia?: string; // dato libre del cliente (Cajas y Confirmaciones)
+  grupoCobro?: string; // Cuentas por Cobrar: en qué grupo va ("Cerveloza", "Zelle", "Préstamos"...)
   monedaId: number;
   // con signo, como el "Saldo pendiente" con el que arranca la hoja del Excel: + me debe, - yo le debo
   saldoInicial?: string;
@@ -279,7 +280,16 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
   if (!terceroId) {
     const n = input.nuevoTercero;
     if (!n?.nombre.trim()) throw errorHttp("Elegí un tercero o escribí el nombre del nuevo", 400);
-    const repetido = await pool.query(`SELECT id FROM terceros WHERE lower(nombre) = lower($1) AND activo`, [n.nombre.trim()]);
+    // Cuentas por Cobrar lleva sus propios clientes, separados de los demás módulos: el nombre solo no se puede
+    // repetir dentro de Cuentas por Cobrar (puede haber un "Manuel" allá y otro en Cuentas Corrientes).
+    const repetido =
+      input.modulo === "POR_COBRAR"
+        ? await pool.query(
+            `SELECT t.id FROM terceros t JOIN cuentas_corrientes cc ON cc.tercero_id = t.id AND cc.modulo = 'POR_COBRAR' AND cc.activo
+             WHERE lower(t.nombre) = lower($1) AND t.activo LIMIT 1`,
+            [n.nombre.trim()]
+          )
+        : await pool.query(`SELECT id FROM terceros WHERE lower(nombre) = lower($1) AND activo`, [n.nombre.trim()]);
     if (repetido.rows[0]) throw errorHttp(`Ya existe "${n.nombre.trim()}": buscalo en la lista en vez de crearlo de nuevo`, 409);
     const r = await pool.query(`INSERT INTO terceros (nombre, identificacion, telefono, tipo) VALUES ($1, $2, $3, $4) RETURNING id`, [
       n.nombre.trim(),
@@ -305,8 +315,8 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
   }
 
   const cuenta = await pool.query(
-    `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual, modulo, moneda_cobro_id, tasa_cobro, referencia) VALUES ($1, $2, $3, 0, $4, $5, $6, $7) RETURNING id`,
-    [terceroId, canalId, input.monedaId, input.modulo ?? "CORRIENTE", cobro.monedaCobroId, cobro.tasaCobro, input.referencia?.trim() || null]
+    `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual, modulo, moneda_cobro_id, tasa_cobro, referencia, grupo_cobro) VALUES ($1, $2, $3, 0, $4, $5, $6, $7, $8) RETURNING id`,
+    [terceroId, canalId, input.monedaId, input.modulo ?? "CORRIENTE", cobro.monedaCobroId, cobro.tasaCobro, input.referencia?.trim() || null, input.grupoCobro?.trim() || null]
   );
   if (saldoInicial && !saldoInicial.isZero()) {
     await registrarMovimientoCuentaCorriente({
@@ -438,6 +448,13 @@ export async function cambiarModuloCuentaCorriente(id: number, modulo: ModuloCue
   return obtenerCuentaCorriente(id);
 }
 
+/** Cuentas por Cobrar: cambiar de grupo a un cliente ("Cerveloza", "Zelle", "Préstamos"...). */
+export async function cambiarGrupoCobro(id: number, grupo: string | null) {
+  const r = await pool.query(`UPDATE cuentas_corrientes SET grupo_cobro = $1 WHERE id = $2 AND modulo = 'POR_COBRAR' RETURNING id`, [grupo?.trim() || null, id]);
+  if (!r.rows[0]) throw errorHttp("Cuenta por cobrar no encontrada", 404);
+  return obtenerCuentaCorriente(id);
+}
+
 export async function listarCuentasCorrientes(filtros: {
   terceroId?: number;
   canalId?: number;
@@ -449,7 +466,8 @@ export async function listarCuentasCorrientes(filtros: {
   const cond: string[] = ["cc.activo"]; // las eliminadas no se listan
   if (filtros.vista === "corrientes") cond.push(`cc.modulo = 'CORRIENTE'`);
   if (filtros.vista === "cajas") cond.push(`cc.modulo = 'CAJA'`);
-  if (filtros.vista === "cobrar") cond.push(`(cc.modulo = 'POR_COBRAR' OR cc.saldo_actual <> 0)`);
+  // Cuentas por Cobrar lleva solo sus propios clientes (ya no se alimenta de las cuentas corrientes con saldo)
+  if (filtros.vista === "cobrar") cond.push(`cc.modulo = 'POR_COBRAR'`);
   const valores: unknown[] = [];
   if (filtros.terceroId) {
     valores.push(filtros.terceroId);

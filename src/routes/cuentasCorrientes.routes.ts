@@ -9,6 +9,7 @@ import {
   avisarClientePorWhatsApp,
   buscarMovimientoPorNumero,
   cambiarEstadoCuentaCorriente,
+  cambiarGrupoCobro,
   cambiarModuloCuentaCorriente,
   cerrarDiaCuentaCorriente,
   configurarCobroCuenta,
@@ -128,6 +129,7 @@ const crearCuentaSchema = z
     saldoInicial: z.string().optional(),
     modulo: z.enum(["CORRIENTE", "POR_COBRAR", "CAJA"]).optional(),
     referencia: z.string().max(200).optional(),
+    grupoCobro: z.string().max(60).optional(),
     monedaCobroId: z.number().int().optional(),
     tasaCobro: z.string().optional(),
   })
@@ -164,6 +166,18 @@ cuentasCorrientesRouter.put("/:id/modulo", requireAuth, requireRole("ADMIN", "AS
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     const { modulo } = z.object({ modulo: z.enum(["CORRIENTE", "POR_COBRAR", "CAJA"]) }).parse(req.body);
     res.json(await cambiarModuloCuentaCorriente(id, modulo));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Cuentas por Cobrar: cambiar de grupo a un cliente
+cuentasCorrientesRouter.put("/:id/grupo", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const { grupo } = z.object({ grupo: z.string().max(60).nullable() }).parse(req.body);
+    res.json(await cambiarGrupoCobro(id, grupo));
   } catch (err) {
     next(err);
   }

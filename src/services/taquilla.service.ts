@@ -61,7 +61,7 @@ const SELECT_SOLICITUD = `
   FROM movimientos_cuenta_corriente mc
   JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
   JOIN monedas m ON m.id = cc.moneda_id
-  JOIN canales_cuenta_corriente ch ON ch.id = cc.canal_id
+  JOIN canales_cuenta_corriente ch ON ch.id = COALESCE(mc.canal_id, cc.canal_id)
   JOIN terceros t ON t.id = cc.tercero_id
   JOIN usuarios ur ON ur.id = mc.usuario_id
   LEFT JOIN usuarios up ON up.id = mc.pagado_por

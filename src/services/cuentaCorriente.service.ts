@@ -38,6 +38,9 @@ interface RegistrarMovimientoCCInput {
   // Comisión descontada del monto: la tasa viaja como factor (4% -> "0.96") y cantidad × factor = lo que queda
   comisionDescontada?: boolean;
   comisionIncluida?: boolean; // el % ya venía sumado en lo enviado: la tasa es 1 / (1 + %)
+  // Confirmaciones: el medio de ESTE movimiento. El cliente se registra una sola vez y cada movimiento lleva su medio
+  // (hoy Nequi, mañana Bancolombia). Sin él, vale el medio de la cuenta.
+  canalMovimientoId?: number;
   // Confirmación de la transferencia: entra ya confirmada, o pendiente hasta que se verifique (ej. Western Union)
   estadoConfirmacion?: "EN_PROCESO" | "CONFIRMADA";
 }
@@ -118,8 +121,8 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
 
         const movResult = await client.query(
       `INSERT INTO movimientos_cuenta_corriente
-        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje, cuenta_destino, comision_descontada, estado_confirmacion, comision_incluida)
-       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15, $16, $17, $18, $19)
+        (cuenta_corriente_id, fecha, descripcion, tipo, cantidad_base, moneda_base_id, tasa, monto, saldo_anterior, saldo_nuevo, transaccion_id, usuario_id, categoria_id, reverso_de_id, anulado, tasa_es_porcentaje, cuenta_destino, comision_descontada, estado_confirmacion, comision_incluida, canal_id)
+       VALUES ($1, COALESCE($2::timestamptz, now()), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::int, $14::int IS NOT NULL, $15, $16, $17, $18, $19, $20)
        RETURNING *`,
       [
         cuenta.id, input.fecha ?? null, input.descripcion ?? null, input.tipo,
@@ -131,6 +134,7 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
         !!(input.comisionDescontada && tasa),
         input.reversoDeId ? null : (input.estadoConfirmacion ?? null),
         !!(input.comisionDescontada && input.comisionIncluida && tasa),
+        input.canalMovimientoId ?? null,
       ]
     );
 
@@ -319,7 +323,18 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
     canalId,
     input.monedaId,
   ]);
-  // Confirmaciones, cliente que ya existía: si ya tiene la cuenta con ese medio y esa moneda, el movimiento va a esa
+  // Confirmaciones, cliente que ya existía: el cliente es uno solo aunque cambie de medio. Si ya tiene una cuenta de
+  // Confirmaciones en esa moneda (con el medio que sea), el movimiento va a esa: el medio lo lleva cada movimiento.
+  if (input.modulo === "CAJA" && input.usarExistente) {
+    const suya = await pool.query(
+      `SELECT id, activo FROM cuentas_corrientes WHERE tercero_id = $1 AND modulo = 'CAJA' AND moneda_id = $2 ORDER BY activo DESC, (canal_id = $3) DESC, id LIMIT 1`,
+      [terceroId, input.monedaId, canalId]
+    );
+    if (suya.rows[0]) {
+      if (!suya.rows[0].activo) await pool.query(`UPDATE cuentas_corrientes SET activo = true WHERE id = $1`, [suya.rows[0].id]);
+      return obtenerCuentaCorriente(suya.rows[0].id);
+    }
+  }
   if (existe.rows[0] && input.modulo === "CAJA" && input.usarExistente) {
     if (existe.rows[0].modulo !== "CAJA") {
       throw errorHttp("Ese nombre ya tiene una cuenta con ese medio y esa moneda en otro módulo (Cuentas Corrientes): registralo con otro nombre o desde allá", 409);
@@ -456,10 +471,11 @@ export async function buscarMovimientoPorNumero(numero: string, canalId?: number
     `SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, t.nombre AS tercero_nombre, ch.nombre AS canal_nombre
      FROM movimientos_cuenta_corriente mc
      JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
-     JOIN canales_cuenta_corriente ch ON ch.id = cc.canal_id
+     -- el medio es el del movimiento; los anteriores a ese dato usan el de la cuenta
+     JOIN canales_cuenta_corriente ch ON ch.id = COALESCE(mc.canal_id, cc.canal_id)
      JOIN terceros t ON t.id = cc.tercero_id
      WHERE NOT mc.anulado AND position(' · ' in mc.descripcion) > 0
-       AND ($2::int IS NULL OR cc.canal_id = $2)
+       AND ($2::int IS NULL OR COALESCE(mc.canal_id, cc.canal_id) = $2)
        AND regexp_replace(split_part(mc.descripcion, ' · ', 2), ' \([0-9.,]+ [A-Z]{3,5} a [0-9.,]+\)$', '') ~* ('(^|[^a-z0-9])' || $1 || '([^a-z0-9]|$)')
      ORDER BY mc.id DESC LIMIT 1`,
     [numero, canalId ?? null]
@@ -828,6 +844,7 @@ export async function anularMovimiento(movimientoId: number, usuarioId: number) 
     tasaEsPorcentaje: m.tasa_es_porcentaje,
     comisionDescontada: m.comision_descontada,
     comisionIncluida: m.comision_incluida,
+    canalMovimientoId: m.canal_id ?? undefined,
     descripcion: `Reverso de: ${m.descripcion ?? m.tipo}`,
     fecha: new Date(m.fecha).toISOString(),
     usuarioId,

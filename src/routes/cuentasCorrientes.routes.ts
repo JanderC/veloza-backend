@@ -388,6 +388,7 @@ const movimientoSchema = z.object({
   tasaEsPorcentaje: z.boolean().optional(),
   comisionDescontada: z.boolean().optional(),
   comisionIncluida: z.boolean().optional(),
+  canalMovimientoId: z.number().int().optional(),
   estadoConfirmacion: z.enum(["EN_PROCESO", "CONFIRMADA"]).optional(),
   cuentaDestino: z.string().max(120).optional(),
   transaccionId: z.number().int().optional(),

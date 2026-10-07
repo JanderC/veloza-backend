@@ -130,6 +130,7 @@ const crearCuentaSchema = z
     modulo: z.enum(["CORRIENTE", "POR_COBRAR", "CAJA"]).optional(),
     referencia: z.string().max(200).optional(),
     grupoCobro: z.string().max(60).optional(),
+    usarExistente: z.boolean().optional(),
     monedaCobroId: z.number().int().optional(),
     tasaCobro: z.string().optional(),
   })

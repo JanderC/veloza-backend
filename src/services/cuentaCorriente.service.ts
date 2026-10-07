@@ -247,6 +247,9 @@ interface CrearCuentaInput {
   modulo?: ModuloCuenta; // dónde se lleva: Cuentas Corrientes (por defecto), Cuentas por Cobrar o Cajas y Confirmaciones
   referencia?: string; // dato libre del cliente (Cajas y Confirmaciones)
   grupoCobro?: string; // Cuentas por Cobrar: en qué grupo va ("Cerveloza", "Zelle", "Préstamos"...)
+  // Confirmaciones: si ya hay un cliente con ese nombre, se usa ese (y su cuenta con ese medio y moneda, o se le abre una)
+  // en vez de rechazarlo. La pantalla lo manda después de preguntar "ya existe, ¿es el mismo?".
+  usarExistente?: boolean;
   monedaId: number;
   // con signo, como el "Saldo pendiente" con el que arranca la hoja del Excel: + me debe, - yo le debo
   saldoInicial?: string;
@@ -290,21 +293,40 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
             [n.nombre.trim()]
           )
         : await pool.query(`SELECT id FROM terceros WHERE lower(nombre) = lower($1) AND activo`, [n.nombre.trim()]);
-    if (repetido.rows[0]) throw errorHttp(`Ya existe "${n.nombre.trim()}": buscalo en la lista en vez de crearlo de nuevo`, 409);
-    const r = await pool.query(`INSERT INTO terceros (nombre, identificacion, telefono, tipo) VALUES ($1, $2, $3, $4) RETURNING id`, [
-      n.nombre.trim(),
-      n.identificacion?.trim() || null,
-      n.telefono?.trim() || null,
-      n.tipo,
-    ]);
-    terceroId = r.rows[0].id as number;
+    if (repetido.rows[0] && input.modulo === "CAJA" && input.usarExistente) {
+      // Confirmaciones: es el mismo cliente (ya se preguntó en la pantalla). Se le completan el teléfono y la cédula si faltaban.
+      terceroId = repetido.rows[0].id as number;
+      await pool.query(`UPDATE terceros SET telefono = COALESCE(NULLIF(telefono, ''), $1), identificacion = COALESCE(NULLIF(identificacion, ''), $2) WHERE id = $3`, [
+        n.telefono?.trim() || null,
+        n.identificacion?.trim() || null,
+        terceroId,
+      ]);
+    } else if (repetido.rows[0]) {
+      throw errorHttp(`Ya existe "${n.nombre.trim()}": buscalo en la lista en vez de crearlo de nuevo`, 409);
+    } else {
+      const r = await pool.query(`INSERT INTO terceros (nombre, identificacion, telefono, tipo) VALUES ($1, $2, $3, $4) RETURNING id`, [
+        n.nombre.trim(),
+        n.identificacion?.trim() || null,
+        n.telefono?.trim() || null,
+        n.tipo,
+      ]);
+      terceroId = r.rows[0].id as number;
+    }
   }
 
-  const existe = await pool.query(`SELECT id, activo FROM cuentas_corrientes WHERE tercero_id = $1 AND canal_id = $2 AND moneda_id = $3`, [
+  const existe = await pool.query(`SELECT id, activo, modulo FROM cuentas_corrientes WHERE tercero_id = $1 AND canal_id = $2 AND moneda_id = $3`, [
     terceroId,
     canalId,
     input.monedaId,
   ]);
+  // Confirmaciones, cliente que ya existía: si ya tiene la cuenta con ese medio y esa moneda, el movimiento va a esa
+  if (existe.rows[0] && input.modulo === "CAJA" && input.usarExistente) {
+    if (existe.rows[0].modulo !== "CAJA") {
+      throw errorHttp("Ese nombre ya tiene una cuenta con ese medio y esa moneda en otro módulo (Cuentas Corrientes): registralo con otro nombre o desde allá", 409);
+    }
+    if (!existe.rows[0].activo) await pool.query(`UPDATE cuentas_corrientes SET activo = true WHERE id = $1`, [existe.rows[0].id]);
+    return obtenerCuentaCorriente(existe.rows[0].id);
+  }
   // Una cuenta eliminada vuelve a aparecer tal como estaba (sus movimientos nunca se borran)
   if (existe.rows[0] && !existe.rows[0].activo) {
     await pool.query(`UPDATE cuentas_corrientes SET activo = true WHERE id = $1`, [existe.rows[0].id]);

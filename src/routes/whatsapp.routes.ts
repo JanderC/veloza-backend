@@ -35,6 +35,7 @@ import { detectarProveedor, listarModelos, PROVEEDORES, probarConexion, type Pro
 import { claveDeChat, esLinea, jidDeTelefono, telefonoDeJid, type Linea } from "../services/whatsapp/transporte";
 import { asegurarChat } from "../services/whatsapp/mensajes";
 import { leerSticker, STICKERS } from "../services/whatsapp/stickers";
+import { actualizarRespuestaRapida, crearRespuestaRapida, eliminarRespuestaRapida, listarRespuestasRapidas, ordenarRespuestasRapidas } from "../services/whatsapp/respuestasRapidas";
 
 export const whatsappRouter = Router();
 
@@ -264,6 +265,57 @@ whatsappRouter.post("/chats/:jid/imagen", requireAuth, PANEL, subida.single("arc
       esperarEnvio: false,
     });
     res.status(201).json({ id: String(fila.id) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- Respuestas rápidas: textos ya escritos que se ponen en el mensaje con un toque ----------
+// Las ve todo el que atiende chats; las cargan y editan el admin y el asesor.
+const EDITA_RAPIDAS = requireRole("ADMIN", "ASESOR");
+const rapidaSchema = z.object({ titulo: z.string().trim().min(1, "Falta el título").max(60), texto: z.string().trim().min(1, "Falta el texto").max(4000) });
+
+whatsappRouter.get("/respuestas-rapidas", requireAuth, PANEL, async (_req, res, next) => {
+  try {
+    res.json(await listarRespuestasRapidas());
+  } catch (err) {
+    next(err);
+  }
+});
+
+whatsappRouter.post("/respuestas-rapidas", requireAuth, EDITA_RAPIDAS, async (req, res, next) => {
+  try {
+    res.status(201).json(await crearRespuestaRapida(rapidaSchema.parse(req.body), req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+whatsappRouter.put("/respuestas-rapidas/orden", requireAuth, EDITA_RAPIDAS, async (req, res, next) => {
+  try {
+    const { ids } = z.object({ ids: z.array(z.number().int().positive()).max(500) }).parse(req.body);
+    res.json(await ordenarRespuestasRapidas(ids));
+  } catch (err) {
+    next(err);
+  }
+});
+
+whatsappRouter.put("/respuestas-rapidas/:id", requireAuth, EDITA_RAPIDAS, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    res.json(await actualizarRespuestaRapida(id, rapidaSchema.parse(req.body)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+whatsappRouter.delete("/respuestas-rapidas/:id", requireAuth, EDITA_RAPIDAS, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    await eliminarRespuestaRapida(id);
+    res.status(204).end();
   } catch (err) {
     next(err);
   }

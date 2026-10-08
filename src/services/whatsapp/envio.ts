@@ -2,7 +2,7 @@ import { generateMessageIDV2 } from "@whiskeysockets/baileys";
 import { pool } from "../../db/pool";
 import { leerConfig } from "./config";
 import { actualizarEstadoMensaje, guardarMensaje, marcarErrorMensaje, obtenerChat, vistaPrevia, type Autor, type FilaMensaje, type TipoMensaje } from "./mensajes";
-import { LINEAS, jidReal, lineaDeClave, nombreDeLinea, sqlDeLinea, telefonoDeJid, transporte, type CitaSalida, type ContenidoSalida, type Linea } from "./transporte";
+import { LINEAS, esGrupo, jidReal, lineaDeClave, nombreDeLinea, sqlDeLinea, telefonoDeJid, transporte, type CitaSalida, type ContenidoSalida, type Linea } from "./transporte";
 
 // UNA sola puerta de salida para todo lo que se envía por WhatsApp. Todo pasa por acá: lo que escribe una persona
 // en el panel o en la burbuja, los avisos de las confirmaciones y el bot. Acá viven las protecciones para que Meta
@@ -154,6 +154,18 @@ async function revisarProteccion(op: OpcionesEnvio, linea: Linea): Promise<{ fri
   // Ráfaga al mismo chat
   const delChat = (enviosPorChat.get(op.jid) ?? []).filter((t) => ahora - t < 60_000);
   if (delChat.length >= RAFAGA_POR_CHAT) throw rechazo("Demasiados mensajes seguidos a este chat: esperá un momento antes de mandar otro.");
+
+  // Grupos: el teléfono ya es parte del grupo, así que no aplica lo de "nunca nos escribió". Lo que sí se cuida
+  // es no mandar el mismo texto a varios grupos seguidos, que es lo que WhatsApp toma por difusión.
+  if (esGrupo(op.jid)) {
+    const textoGrupo = normalizar(op.texto ?? "");
+    if (textoGrupo.length >= 12) {
+      const iguales = (textosAFrios.get(textoGrupo) ?? []).filter((x) => ahora - x.en < VENTANA_IGUALES_MS);
+      const otros = new Set(iguales.map((x) => x.jid).filter((j) => j !== op.jid));
+      if (otros.size >= IGUALES_A_FRIOS) throw rechazo("Ese mismo mensaje ya se mandó a varios grupos seguidos. Para que WhatsApp no lo tome como difusión, cambiá el texto o esperá un rato.");
+    }
+    return { frio: true }; // se anota el texto, para contar los grupos a los que va el mismo
+  }
 
   const chat = await obtenerChat(op.jid);
   const frio = !chat?.ultimo_entrante_en;

@@ -35,6 +35,11 @@ export function lineaDeClave(clave: string): Linea {
 export function jidReal(clave: string) {
   return clave.split("#")[0]!;
 }
+/** ¿La clave es de un grupo de WhatsApp? (los grupos terminan en @g.us) */
+export function esGrupo(clave: string) {
+  return jidReal(clave).endsWith("@g.us");
+}
+
 /** Condición SQL para quedarse con los chats o mensajes de una línea, según su columna jid. */
 export function sqlDeLinea(columna: string, linea: Linea) {
   return linea === 1 ? `${columna} NOT LIKE '%#_'` : `${columna} LIKE '%#${linea}'`;

@@ -47,7 +47,8 @@ const subida = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 function jidParam(valor: string | undefined) {
   const jid = decodeURIComponent(valor ?? "");
   // puede traer la línea al final: "...@s.whatsapp.net#2"
-  if (!/^\d{6,20}@(s\.whatsapp\.net|lid)(#[23])?$/.test(jid)) throw Object.assign(new Error("Chat inválido"), { status: 400 });
+  // (los grupos son <id>@g.us; los viejos traen un guion en el id)
+  if (!/^(\d{6,20}@(s\.whatsapp\.net|lid)|\d{6,30}(-\d{6,20})?@g\.us)(#[23])?$/.test(jid)) throw Object.assign(new Error("Chat inválido"), { status: 400 });
   return jid;
 }
 
@@ -164,7 +165,7 @@ whatsappRouter.post("/conexion/reset", requireAuth, SOLO_ADMIN, async (req, res,
 });
 
 // ---------- Chats y mensajes ----------
-const FILTROS: FiltroChats[] = ["todos", "no_leidos", "atencion", "bot", "humano", "archivados"];
+const FILTROS: FiltroChats[] = ["todos", "no_leidos", "atencion", "bot", "humano", "archivados", "grupos"];
 
 whatsappRouter.get("/chats", requireAuth, PANEL, async (req, res, next) => {
   try {

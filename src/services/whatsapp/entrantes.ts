@@ -12,7 +12,7 @@ import { randomUUID } from "crypto";
 import { pool } from "../../db/pool";
 import { subirArchivo } from "../almacenamiento.service";
 import { leerConfig } from "./config";
-import { jidCanonico } from "./conexion";
+import { jidCanonico, nombreDeGrupo } from "./conexion";
 import { actualizarChat, actualizarEstadoMensaje, asegurarChat, guardarMensaje, notaInterna, obtenerChat, type EstadoMensaje, type TipoMensaje } from "./mensajes";
 import { guardarMediaEnMemoria } from "./mediaMemoria";
 import { claveDeChat, transporte, telefonoDeJid, type Linea } from "./transporte";
@@ -110,7 +110,9 @@ export async function procesarEntrantes(mensajes: WAMessage[], tipo: "notify" | 
 async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append", linea: Linea) {
   const key = msg.key;
   const remoto = key.remoteJid;
-  if (!remoto || isJidGroup(remoto) || isJidBroadcast(remoto) || isJidStatusBroadcast(remoto) || isJidNewsletter(remoto)) return;
+  // los grupos sí se guardan (se ven y se les escribe); difusiones, estados y canales, no
+  if (!remoto || isJidBroadcast(remoto) || isJidStatusBroadcast(remoto) || isJidNewsletter(remoto)) return;
+  const grupo = !!isJidGroup(remoto);
   const contenido = normalizeMessageContent(msg.message);
   if (!contenido) return;
   const p = parsear(contenido);
@@ -128,7 +130,15 @@ async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append", line
     if (existe.rows.length) return;
   }
 
-  await asegurarChat(jid, deMi ? null : msg.pushName ?? null);
+  // El nombre del chat: en un grupo es el del grupo (no el de quien escribió); en uno personal, el del cliente
+  await asegurarChat(jid, grupo ? await nombreDeGrupo(linea, real) : deMi ? null : (msg.pushName ?? null));
+  // En un grupo hablan varios: se anota quién escribió (su nombre de WhatsApp o, si no lo trae, su número)
+  let remitente: string | null = null;
+  if (grupo && !deMi) {
+    const autorJid = key.participant ? await jidCanonico(key.participant, (key as { participantAlt?: string | null }).participantAlt, linea).catch(() => null) : null;
+    const numero = autorJid && !autorJid.endsWith("@lid") ? `+${telefonoDeJid(autorJid)}` : null;
+    remitente = msg.pushName?.trim() || numero || "Participante";
+  }
 
   // ¿Es una respuesta a otro mensaje? WhatsApp manda el id del citado: se busca el nuestro para mostrar la cita
   let respondeA: string | null = null;
@@ -157,12 +167,15 @@ async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append", line
     fecha: fechaDe(msg),
     cuentaNoLeido: tipoUpsert === "notify" && !deMi,
     respondeA,
+    remitente,
   });
   if (!fila) return; // ya estaba guardado
   if (media) guardarMediaEnMemoria(fila.id, media.buffer, p.mime!);
 
   // El historial sincronizado al vincular solo se guarda
   if (tipoUpsert !== "notify") return;
+  // En los grupos no hay bot ni avisos automáticos: se leen y se responden a mano
+  if (grupo) return;
 
   // El bot y el asistente del dueño solo existen en la línea 1. Las otras líneas son para leer y responder
   // a mano: lo que entra queda en la bandeja y nada contesta solo.

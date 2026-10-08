@@ -1,7 +1,7 @@
 import { pool } from "../../db/pool";
 import { generarUrlTemporal } from "../almacenamiento.service";
 import { emitirPanel } from "./eventos";
-import { lineaDeClave, nombreDeLinea, sqlDeLinea, telefonoDeJid, type Linea } from "./transporte";
+import { esGrupo, lineaDeClave, nombreDeLinea, sqlDeLinea, telefonoDeJid, type Linea } from "./transporte";
 
 export type Autor = "cliente" | "bot" | "humano" | "telefono" | "sistema";
 export type TipoMensaje = "texto" | "imagen" | "audio" | "documento" | "sticker" | "video";
@@ -68,6 +68,8 @@ export interface FilaMensaje {
   cita_texto?: string | null;
   cita_de_mi?: boolean | null;
   cita_tipo?: TipoMensaje | null;
+  /** En un grupo: quién escribió el mensaje */
+  remitente?: string | null;
 }
 
 const RANGO_ESTADO: Record<EstadoMensaje, number> = { error: -1, pendiente: 0, enviado: 1, entregado: 2, leido: 3 };
@@ -90,10 +92,10 @@ export async function asegurarChat(jid: string, nombre?: string | null) {
   const telefono = telefonoDeJid(jid);
   await pool.query(
     `INSERT INTO wa_chats (jid, telefono, nombre, tercero_id)
-     VALUES ($1, $2, $3, (SELECT id FROM terceros WHERE activo AND telefono IS NOT NULL
-                          AND right(regexp_replace(telefono, '\\D', '', 'g'), 10) = right($2, 10) ORDER BY id LIMIT 1))
+     VALUES ($1, $2, $3, CASE WHEN $4 THEN NULL ELSE (SELECT id FROM terceros WHERE activo AND telefono IS NOT NULL
+                          AND right(regexp_replace(telefono, '\\D', '', 'g'), 10) = right($2, 10) ORDER BY id LIMIT 1) END)
      ON CONFLICT (jid) DO UPDATE SET nombre = COALESCE(EXCLUDED.nombre, wa_chats.nombre)`,
-    [jid, telefono, nombre ?? null]
+    [jid, telefono, nombre ?? null, esGrupo(jid)] // un grupo no es un cliente: no se enlaza con nadie por teléfono
   );
 }
 
@@ -147,14 +149,16 @@ interface NuevoMensaje {
   cuentaNoLeido?: boolean;
   /** id del mensaje de este chat al que responde (cita) */
   respondeA?: string | null;
+  /** En un grupo: quién lo escribió */
+  remitente?: string | null;
 }
 
 /** Guarda el mensaje (idempotente por wa_id) y actualiza el resumen del chat. null si ya existía. */
 export async function guardarMensaje(m: NuevoMensaje): Promise<FilaMensaje | null> {
   const tipo = m.tipo ?? "texto";
   const r = await pool.query(
-    `INSERT INTO wa_mensajes (jid, wa_id, wa_key, de_mi, autor, tipo, texto, media_key, media_mime, media_bytes, estado, interno, usuario_id, created_at, turno_hasta, responde_a)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, COALESCE($14, now()), $15, $16)
+    `INSERT INTO wa_mensajes (jid, wa_id, wa_key, de_mi, autor, tipo, texto, media_key, media_mime, media_bytes, estado, interno, usuario_id, created_at, turno_hasta, responde_a, remitente)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, COALESCE($14, now()), $15, $16, $17)
      ON CONFLICT (wa_id) DO NOTHING
      RETURNING *`,
     [
@@ -174,6 +178,7 @@ export async function guardarMensaje(m: NuevoMensaje): Promise<FilaMensaje | nul
       m.fecha ?? null,
       m.turnoHasta ?? null,
       m.respondeA ?? null,
+      m.remitente ?? null,
     ]
   );
   const fila: FilaMensaje | undefined = r.rows[0];
@@ -258,6 +263,7 @@ export function mensajeParaPanel(m: FilaMensaje) {
     error: m.error,
     interno: m.interno,
     fecha: m.created_at,
+    remitente: m.remitente ?? null,
     // el mensaje al que responde: quién lo dijo y un resumen
     cita: m.responde_a && m.cita_tipo ? { id: String(m.responde_a), deMi: !!m.cita_de_mi, texto: vistaPrevia(m.cita_tipo, m.cita_texto ?? null) || "Mensaje" } : null,
   };
@@ -275,8 +281,9 @@ export async function chatParaPanel(c: FilaChat) {
     // por cuál de los teléfonos vinculados es esta conversación
     linea,
     nombreLinea: nombreDeLinea(linea),
+    esGrupo: esGrupo(c.jid),
     telefono: c.telefono,
-    nombre: c.nombre_guardado ?? terceroNombre ?? c.nombre ?? `+${c.telefono}`,
+    nombre: c.nombre_guardado ?? terceroNombre ?? c.nombre ?? (esGrupo(c.jid) ? "Grupo" : `+${c.telefono}`),
     nombreWhatsapp: c.nombre,
     nombreGuardado: c.nombre_guardado,
     terceroId: c.tercero_id,
@@ -293,7 +300,7 @@ export async function chatParaPanel(c: FilaChat) {
   };
 }
 
-export type FiltroChats = "todos" | "no_leidos" | "atencion" | "bot" | "humano" | "archivados";
+export type FiltroChats = "todos" | "no_leidos" | "atencion" | "bot" | "humano" | "archivados" | "grupos";
 
 export async function listarChats(filtro: FiltroChats, busqueda: string | undefined, limite = 200, linea?: Linea) {
   const cond: string[] = [];
@@ -305,6 +312,7 @@ export async function listarChats(filtro: FiltroChats, busqueda: string | undefi
   if (filtro === "atencion") cond.push("c.necesita_humano");
   if (filtro === "bot") cond.push("c.bot_activo");
   if (filtro === "humano") cond.push("NOT c.bot_activo");
+  if (filtro === "grupos") cond.push("c.jid LIKE '%@g.us%'");
   if (busqueda?.trim()) {
     valores.push(`%${busqueda.trim()}%`);
     const p = `$${valores.length}`;

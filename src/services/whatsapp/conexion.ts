@@ -14,7 +14,8 @@ import QRCode from "qrcode";
 import { pool } from "../../db/pool";
 import { emitirPanel } from "./eventos";
 import { borrarSesion, haySesionGuardada, usarSesionBd } from "./sesionBd";
-import { LINEAS, jidReal, nombreDeLinea, usarTransporte, type Linea, type Transporte } from "./transporte";
+import { LINEAS, claveDeChat, jidReal, nombreDeLinea, usarTransporte, type Linea, type Transporte } from "./transporte";
+import { actualizarChat, asegurarChat, obtenerChat } from "./mensajes";
 import { procesarActualizaciones, procesarEntrantes } from "./entrantes";
 
 // Ciclo de vida del socket de Baileys, uno por línea (teléfono vinculado):
@@ -190,6 +191,8 @@ export async function iniciarConexion(linea: Linea = 1): Promise<void> {
       L.conectadoDesde = new Date();
       usarTransporte(linea, crearTransporte(linea, s));
       cambiarEstado(linea, "CONECTADO");
+      // los grupos de ese teléfono aparecen en la bandeja aunque nadie haya escrito todavía
+      void sincronizarGrupos(linea, s, vigente);
     }
     if (u.connection === "close") {
       const codigo = (u.lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
@@ -203,6 +206,16 @@ export async function iniciarConexion(linea: Linea = 1): Promise<void> {
   s.ev.on("messages.upsert", ({ messages, type }) => {
     if (!vigente()) return;
     procesarEntrantes(messages, type, linea).catch((e) => console.error(`${etiqueta(linea)} error procesando mensajes`, e));
+  });
+
+  // Grupos: uno nuevo al que agregaron al teléfono, o un cambio de nombre
+  s.ev.on("groups.upsert", (grupos) => {
+    if (!vigente()) return;
+    for (const g of grupos) void anotarGrupo(linea, g.id, g.subject).catch(() => {});
+  });
+  s.ev.on("groups.update", (cambios) => {
+    if (!vigente()) return;
+    for (const g of cambios) if (g.id && g.subject) void anotarGrupo(linea, g.id, g.subject).catch(() => {});
   });
 
   s.ev.on("messages.update", (updates) => {
@@ -295,5 +308,47 @@ export async function autoIniciar() {
     }
     // una línea que falle al arrancar no frena a las otras
     await iniciarConexion(l.id).catch((e) => console.error(`${etiqueta(l.id)} no se pudo iniciar`, e));
+  }
+}
+
+// ---------- Grupos ----------
+const nombresDeGrupos = new Map<string, string>(); // clave del chat -> nombre del grupo
+
+/** Deja el grupo en la bandeja con su nombre (lo crea si no estaba). */
+async function anotarGrupo(linea: Linea, jidGrupo: string, nombre: string | undefined | null) {
+  const clave = claveDeChat(linea, jidGrupo);
+  const limpio = nombre?.trim() || null;
+  if (limpio) nombresDeGrupos.set(clave, limpio);
+  const antes = await obtenerChat(clave);
+  if (!antes) return asegurarChat(clave, limpio);
+  // si cambió el nombre del grupo, se avisa al panel
+  if (limpio && antes.nombre !== limpio) await actualizarChat(clave, { nombre: limpio });
+}
+
+/** Al conectar: todos los grupos en los que está ese teléfono, con su nombre. */
+async function sincronizarGrupos(linea: Linea, s: WASocket, vigente: () => boolean) {
+  try {
+    const grupos = await s.groupFetchAllParticipating();
+    for (const g of Object.values(grupos)) {
+      if (!vigente()) return;
+      await anotarGrupo(linea, g.id, g.subject);
+    }
+    console.log(`${etiqueta(linea)} ${Object.keys(grupos).length} grupos en la bandeja`);
+  } catch (e) {
+    console.warn(`${etiqueta(linea)} no se pudieron leer los grupos: ${(e as Error).message}`);
+  }
+}
+
+/** El nombre de un grupo (lo pide a WhatsApp la primera vez y lo recuerda). null si no se pudo saber. */
+export async function nombreDeGrupo(linea: Linea, jidGrupo: string): Promise<string | null> {
+  const clave = claveDeChat(linea, jidGrupo);
+  const sabido = nombresDeGrupos.get(clave);
+  if (sabido) return sabido;
+  try {
+    const meta = await de(linea).sock?.groupMetadata(jidReal(jidGrupo));
+    if (meta?.subject) nombresDeGrupos.set(clave, meta.subject);
+    return meta?.subject ?? null;
+  } catch {
+    return null;
   }
 }

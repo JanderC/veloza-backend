@@ -130,6 +130,15 @@ async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append", line
 
   await asegurarChat(jid, deMi ? null : msg.pushName ?? null);
 
+  // ¿Es una respuesta a otro mensaje? WhatsApp manda el id del citado: se busca el nuestro para mostrar la cita
+  let respondeA: string | null = null;
+  const tipoWa = getContentType(contenido);
+  const citadoId = tipoWa ? (contenido[tipoWa] as { contextInfo?: { stanzaId?: string | null } } | null | undefined)?.contextInfo?.stanzaId : null;
+  if (citadoId) {
+    const q = await pool.query(`SELECT id FROM wa_mensajes WHERE wa_id = $1 AND jid = $2`, [citadoId, jid]);
+    respondeA = q.rows[0] ? String(q.rows[0].id) : null;
+  }
+
   let media: { buffer: Buffer; key: string } | null = null;
   if (p.conMedia && p.mime) media = await subirMedia(msg, jid, p.mime, linea);
 
@@ -147,6 +156,7 @@ async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append", line
     estado: deMi ? "enviado" : "leido",
     fecha: fechaDe(msg),
     cuentaNoLeido: tipoUpsert === "notify" && !deMi,
+    respondeA,
   });
   if (!fila) return; // ya estaba guardado
   if (media) guardarMediaEnMemoria(fila.id, media.buffer, p.mime!);

@@ -115,14 +115,16 @@ function crearTransporte(linea: Linea, s: WASocket): Transporte {
   return {
     conectado: () => de(linea).estado === "CONECTADO" && de(linea).sock === s,
     miJid: () => (s.user?.id ? jidNormalizedUser(s.user.id) : null),
-    enviar: async (jid, contenido, messageId) => {
+    enviar: async (jid, contenido, messageId, cita) => {
       const mensaje =
         "sticker" in contenido
           ? { sticker: contenido.sticker }
           : "imagen" in contenido
             ? { image: contenido.imagen, mimetype: contenido.mime, caption: contenido.texto }
             : { text: contenido.texto };
-      const r = await s.sendMessage(jidReal(jid), mensaje, { messageId });
+      // al responder a un mensaje, WhatsApp necesita la clave del original y algo de su contenido para armar la cita
+      const quoted = cita ? { key: { ...cita.key, remoteJid: jidReal(cita.key.remoteJid ?? jid) }, message: { conversation: cita.texto } } : undefined;
+      const r = await s.sendMessage(jidReal(jid), mensaje, { messageId, quoted });
       return r?.key;
     },
     presencia: (jid, tipo) => s.sendPresenceUpdate(tipo, jidReal(jid)),

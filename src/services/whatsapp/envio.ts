@@ -1,8 +1,8 @@
 import { generateMessageIDV2 } from "@whiskeysockets/baileys";
 import { pool } from "../../db/pool";
 import { leerConfig } from "./config";
-import { actualizarEstadoMensaje, guardarMensaje, marcarErrorMensaje, obtenerChat, type Autor, type FilaMensaje, type TipoMensaje } from "./mensajes";
-import { LINEAS, lineaDeClave, nombreDeLinea, sqlDeLinea, telefonoDeJid, transporte, type ContenidoSalida, type Linea } from "./transporte";
+import { actualizarEstadoMensaje, guardarMensaje, marcarErrorMensaje, obtenerChat, vistaPrevia, type Autor, type FilaMensaje, type TipoMensaje } from "./mensajes";
+import { LINEAS, jidReal, lineaDeClave, nombreDeLinea, sqlDeLinea, telefonoDeJid, transporte, type CitaSalida, type ContenidoSalida, type Linea } from "./transporte";
 
 // UNA sola puerta de salida para todo lo que se envía por WhatsApp. Todo pasa por acá: lo que escribe una persona
 // en el panel o en la burbuja, los avisos de las confirmaciones y el bot. Acá viven las protecciones para que Meta
@@ -35,6 +35,7 @@ interface Trabajo {
   jid: string;
   linea: Linea;
   contenido: ContenidoSalida;
+  cita?: CitaSalida;
   waId: string;
   prioridad: number; // 0 = persona, 1 = bot/sistema
   orden: number;
@@ -136,7 +137,7 @@ async function enviarAhora(t: Trabajo) {
     await tr.presencia(t.jid, "paused").catch(() => {});
   }
 
-  const key = await tr.enviar(t.jid, t.contenido, t.waId);
+  const key = await tr.enviar(t.jid, t.contenido, t.waId, t.cita);
   r.ultimoEnvio = Date.now();
   r.ultimoMinuto.push(r.ultimoEnvio);
   dia.n++;
@@ -208,6 +209,8 @@ export interface OpcionesEnvio {
   imagen?: { buffer: Buffer; mime: string; mediaKey?: string | null };
   /** Un sticker (WebP de 512x512). Va solo, sin texto. */
   sticker?: { buffer: Buffer; mediaKey?: string | null };
+  /** id (de wa_mensajes) del mensaje de este chat al que se responde: sale citado */
+  respondeA?: string | null;
   usuarioId?: number | null;
   turnoHasta?: string | null;
   /** false = devuelve apenas queda en cola (el panel ve el ✓ por SSE) */
@@ -226,6 +229,22 @@ export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
 
   const { frio } = await revisarProteccion(op, linea);
 
+  // El mensaje al que se responde tiene que ser de esta misma conversación y haber pasado por WhatsApp
+  let cita: CitaSalida | undefined;
+  let respondeA: string | null = null;
+  if (op.respondeA) {
+    const q = await pool.query(`SELECT id, wa_id, wa_key, de_mi, tipo, texto FROM wa_mensajes WHERE id = $1 AND jid = $2 AND NOT interno`, [op.respondeA, op.jid]);
+    const original = q.rows[0];
+    if (original?.wa_id) {
+      respondeA = String(original.id);
+      const guardada = (original.wa_key ?? {}) as { participant?: string };
+      cita = {
+        key: { remoteJid: jidReal(op.jid), fromMe: original.de_mi, id: original.wa_id, participant: guardada.participant },
+        texto: vistaPrevia(original.tipo, original.texto) || "Mensaje",
+      };
+    }
+  }
+
   const waId = generateMessageIDV2(tr.miJid() ?? undefined);
   const tipo: TipoMensaje = op.sticker ? "sticker" : op.imagen ? "imagen" : "texto";
 
@@ -243,6 +262,7 @@ export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
     estado: "pendiente",
     usuarioId: op.usuarioId ?? null,
     turnoHasta: op.turnoHasta ?? null,
+    respondeA,
   });
   if (!fila) throw new Error("No se pudo registrar el mensaje");
   anotarEnvio(op, frio);
@@ -254,7 +274,7 @@ export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
       : { texto: op.texto ?? "" };
 
   const enviado = new Promise<void>((resolve, reject) => {
-    cola.push({ jid: op.jid, linea, contenido, waId, prioridad: op.autor === "humano" ? 0 : 1, orden: contadorOrden++, resolve, reject });
+    cola.push({ jid: op.jid, linea, contenido, cita, waId, prioridad: op.autor === "humano" ? 0 : 1, orden: contadorOrden++, resolve, reject });
     void procesarCola();
   });
   if (op.esperarEnvio === false) {

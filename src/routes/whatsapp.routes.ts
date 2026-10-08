@@ -221,6 +221,8 @@ whatsappRouter.post("/chats/:jid/leer", requireAuth, PANEL, async (req, res, nex
   }
 });
 
+const idMensaje = z.string().regex(/^\d{1,18}$/);
+
 async function nombreUsuario(id: number) {
   const r = await pool.query(`SELECT nombre FROM usuarios WHERE id = $1`, [id]);
   return (r.rows[0]?.nombre as string | undefined) ?? "Un asesor";
@@ -230,10 +232,11 @@ async function nombreUsuario(id: number) {
 whatsappRouter.post("/chats/:jid/mensajes", requireAuth, PANEL, async (req, res, next) => {
   try {
     const jid = jidParam(req.params.jid);
-    const { texto } = z.object({ texto: z.string().trim().min(1).max(4000) }).parse(req.body);
+    // respondeA: el mensaje de este chat que se está contestando (sale citado)
+    const { texto, respondeA } = z.object({ texto: z.string().trim().min(1).max(4000), respondeA: idMensaje.optional() }).parse(req.body);
     if (!(await obtenerChat(jid))) return res.status(404).json({ error: "Chat no encontrado" });
     await tomarControl(jid, await nombreUsuario(req.user!.id));
-    const fila = await enviarMensaje({ jid, autor: "humano", texto, usuarioId: req.user!.id, esperarEnvio: false });
+    const fila = await enviarMensaje({ jid, autor: "humano", texto, respondeA, usuarioId: req.user!.id, esperarEnvio: false });
     res.status(201).json({ id: String(fila.id) });
   } catch (err) {
     next(err);
@@ -255,6 +258,7 @@ whatsappRouter.post("/chats/:jid/imagen", requireAuth, PANEL, subida.single("arc
       autor: "humano",
       texto,
       imagen: { buffer: archivo.buffer, mime: archivo.mimetype, mediaKey },
+      respondeA: typeof req.body.respondeA === "string" && /^\d{1,18}$/.test(req.body.respondeA) ? req.body.respondeA : null,
       usuarioId: req.user!.id,
       esperarEnvio: false,
     });
@@ -279,14 +283,14 @@ whatsappRouter.get("/stickers/:id", (req, res) => {
 whatsappRouter.post("/chats/:jid/sticker", requireAuth, PANEL, async (req, res, next) => {
   try {
     const jid = jidParam(req.params.jid);
-    const { sticker } = z.object({ sticker: z.string().min(1).max(60) }).parse(req.body);
+    const { sticker, respondeA } = z.object({ sticker: z.string().min(1).max(60), respondeA: idMensaje.optional() }).parse(req.body);
     const s = leerSticker(sticker);
     if (!s) return res.status(404).json({ error: "Sticker no encontrado" });
     if (!(await obtenerChat(jid))) return res.status(404).json({ error: "Chat no encontrado" });
     // se guarda una sola copia por sticker (misma clave siempre): así el panel puede mostrarlo en la conversación
     const mediaKey = await subirArchivo("whatsapp/stickers", s.id, s.buffer, "image/webp").catch(() => null);
     await tomarControl(jid, await nombreUsuario(req.user!.id));
-    const fila = await enviarMensaje({ jid, autor: "humano", sticker: { buffer: s.buffer, mediaKey }, usuarioId: req.user!.id, esperarEnvio: false });
+    const fila = await enviarMensaje({ jid, autor: "humano", sticker: { buffer: s.buffer, mediaKey }, respondeA, usuarioId: req.user!.id, esperarEnvio: false });
     res.status(201).json({ id: String(fila.id) });
   } catch (err) {
     next(err);

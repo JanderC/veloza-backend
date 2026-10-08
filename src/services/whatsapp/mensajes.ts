@@ -63,6 +63,11 @@ export interface FilaMensaje {
   usuario_id: number | null;
   turno_hasta: string | null;
   created_at: string;
+  // El mensaje al que responde (citado), y lo necesario para mostrarlo arriba del globo
+  responde_a: string | null;
+  cita_texto?: string | null;
+  cita_de_mi?: boolean | null;
+  cita_tipo?: TipoMensaje | null;
 }
 
 const RANGO_ESTADO: Record<EstadoMensaje, number> = { error: -1, pendiente: 0, enviado: 1, entregado: 2, leido: 3 };
@@ -140,14 +145,16 @@ interface NuevoMensaje {
   fecha?: Date;
   /** false = historial sincronizado ("append"): no suma no leídos */
   cuentaNoLeido?: boolean;
+  /** id del mensaje de este chat al que responde (cita) */
+  respondeA?: string | null;
 }
 
 /** Guarda el mensaje (idempotente por wa_id) y actualiza el resumen del chat. null si ya existía. */
 export async function guardarMensaje(m: NuevoMensaje): Promise<FilaMensaje | null> {
   const tipo = m.tipo ?? "texto";
   const r = await pool.query(
-    `INSERT INTO wa_mensajes (jid, wa_id, wa_key, de_mi, autor, tipo, texto, media_key, media_mime, media_bytes, estado, interno, usuario_id, created_at, turno_hasta)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, COALESCE($14, now()), $15)
+    `INSERT INTO wa_mensajes (jid, wa_id, wa_key, de_mi, autor, tipo, texto, media_key, media_mime, media_bytes, estado, interno, usuario_id, created_at, turno_hasta, responde_a)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, COALESCE($14, now()), $15, $16)
      ON CONFLICT (wa_id) DO NOTHING
      RETURNING *`,
     [
@@ -166,10 +173,16 @@ export async function guardarMensaje(m: NuevoMensaje): Promise<FilaMensaje | nul
       m.usuarioId ?? null,
       m.fecha ?? null,
       m.turnoHasta ?? null,
+      m.respondeA ?? null,
     ]
   );
   const fila: FilaMensaje | undefined = r.rows[0];
   if (!fila) return null;
+  // si responde a otro mensaje, se trae lo citado para que el panel lo muestre de una vez
+  if (fila.responde_a) {
+    const q = await pool.query(`SELECT texto, de_mi, tipo FROM wa_mensajes WHERE id = $1`, [fila.responde_a]);
+    if (q.rows[0]) Object.assign(fila, { cita_texto: q.rows[0].texto, cita_de_mi: q.rows[0].de_mi, cita_tipo: q.rows[0].tipo });
+  }
 
   if (!fila.interno) {
     const esEntrante = !m.deMi;
@@ -245,6 +258,8 @@ export function mensajeParaPanel(m: FilaMensaje) {
     error: m.error,
     interno: m.interno,
     fecha: m.created_at,
+    // el mensaje al que responde: quién lo dijo y un resumen
+    cita: m.responde_a && m.cita_tipo ? { id: String(m.responde_a), deMi: !!m.cita_de_mi, texto: vistaPrevia(m.cita_tipo, m.cita_texto ?? null) || "Mensaje" } : null,
   };
 }
 
@@ -309,19 +324,21 @@ export async function listarChats(filtro: FiltroChats, busqueda: string | undefi
 
 export async function listarMensajes(jid: string, opciones: { antesDe?: string; busqueda?: string; limite?: number }) {
   const valores: unknown[] = [jid];
-  const cond = ["jid = $1"];
+  const cond = ["m.jid = $1"];
   if (opciones.antesDe) {
     valores.push(opciones.antesDe);
-    cond.push(`id < $${valores.length}`);
+    cond.push(`m.id < $${valores.length}`);
   }
   if (opciones.busqueda?.trim()) {
     valores.push(`%${opciones.busqueda.trim()}%`);
-    cond.push(`texto ILIKE $${valores.length}`);
+    cond.push(`m.texto ILIKE $${valores.length}`);
   }
   const limite = Math.min(opciones.limite ?? 50, 200);
   valores.push(limite + 1);
   const r = await pool.query(
-    `SELECT * FROM wa_mensajes WHERE ${cond.join(" AND ")} ORDER BY id DESC LIMIT $${valores.length}`,
+    `SELECT m.*, q.texto AS cita_texto, q.de_mi AS cita_de_mi, q.tipo AS cita_tipo
+     FROM wa_mensajes m LEFT JOIN wa_mensajes q ON q.id = m.responde_a
+     WHERE ${cond.join(" AND ")} ORDER BY m.id DESC LIMIT $${valores.length}`,
     valores
   );
   const hayMas = r.rows.length > limite;

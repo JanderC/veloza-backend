@@ -45,11 +45,18 @@ export type ContenidoSalida =
   | { imagen: Buffer; mime: string; texto?: string }
   | { sticker: Buffer }; // WebP de 512x512
 
+/** El mensaje que se cita al responder: su clave en WhatsApp y el texto que se muestra en la cita. */
+export interface CitaSalida {
+  key: WAMessageKey;
+  texto: string;
+}
+
 export interface Transporte {
   conectado(): boolean;
   /** jid propio canónico (<numero>@s.whatsapp.net) o null si no hay sesión */
   miJid(): string | null;
-  enviar(jid: string, contenido: ContenidoSalida, messageId: string): Promise<WAMessageKey | undefined>;
+  /** cita: el mensaje al que se responde (sale citado arriba, como al "responder" en WhatsApp) */
+  enviar(jid: string, contenido: ContenidoSalida, messageId: string, cita?: CitaSalida): Promise<WAMessageKey | undefined>;
   presencia(jid: string, tipo: "composing" | "paused" | "available"): Promise<void>;
   leer(claves: WAMessageKey[]): Promise<void>;
   /** jid si el número tiene WhatsApp, null si no */

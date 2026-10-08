@@ -117,9 +117,11 @@ function crearTransporte(linea: Linea, s: WASocket): Transporte {
     miJid: () => (s.user?.id ? jidNormalizedUser(s.user.id) : null),
     enviar: async (jid, contenido, messageId) => {
       const mensaje =
-        "imagen" in contenido
-          ? { image: contenido.imagen, mimetype: contenido.mime, caption: contenido.texto }
-          : { text: contenido.texto };
+        "sticker" in contenido
+          ? { sticker: contenido.sticker }
+          : "imagen" in contenido
+            ? { image: contenido.imagen, mimetype: contenido.mime, caption: contenido.texto }
+            : { text: contenido.texto };
       const r = await s.sendMessage(jidReal(jid), mensaje, { messageId });
       return r?.key;
     },

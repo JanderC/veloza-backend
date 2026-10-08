@@ -34,6 +34,7 @@ import { CONFIG_POR_DEFECTO, claveDe, configSchema, guardarClave, guardarConfig,
 import { detectarProveedor, listarModelos, PROVEEDORES, probarConexion, type Proveedor } from "../services/whatsapp/ia";
 import { claveDeChat, esLinea, jidDeTelefono, telefonoDeJid, type Linea } from "../services/whatsapp/transporte";
 import { asegurarChat } from "../services/whatsapp/mensajes";
+import { leerSticker, STICKERS } from "../services/whatsapp/stickers";
 
 export const whatsappRouter = Router();
 
@@ -257,6 +258,35 @@ whatsappRouter.post("/chats/:jid/imagen", requireAuth, PANEL, subida.single("arc
       usuarioId: req.user!.id,
       esperarEnvio: false,
     });
+    res.status(201).json({ id: String(fila.id) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Los stickers del negocio (los que se mandan al confirmar una transferencia)
+whatsappRouter.get("/stickers", requireAuth, PANEL, (_req, res) => {
+  res.json(STICKERS.map((s) => ({ id: s.id, nombre: s.nombre })));
+});
+
+// La imagen de un sticker, para mostrarlo en el selector
+whatsappRouter.get("/stickers/:id", (req, res) => {
+  const s = leerSticker(req.params.id ?? "");
+  if (!s) return res.status(404).json({ error: "Sticker no encontrado" });
+  res.set({ "Content-Type": "image/webp", "Cache-Control": "public, max-age=86400" }).send(s.buffer);
+});
+
+whatsappRouter.post("/chats/:jid/sticker", requireAuth, PANEL, async (req, res, next) => {
+  try {
+    const jid = jidParam(req.params.jid);
+    const { sticker } = z.object({ sticker: z.string().min(1).max(60) }).parse(req.body);
+    const s = leerSticker(sticker);
+    if (!s) return res.status(404).json({ error: "Sticker no encontrado" });
+    if (!(await obtenerChat(jid))) return res.status(404).json({ error: "Chat no encontrado" });
+    // se guarda una sola copia por sticker (misma clave siempre): así el panel puede mostrarlo en la conversación
+    const mediaKey = await subirArchivo("whatsapp/stickers", s.id, s.buffer, "image/webp").catch(() => null);
+    await tomarControl(jid, await nombreUsuario(req.user!.id));
+    const fila = await enviarMensaje({ jid, autor: "humano", sticker: { buffer: s.buffer, mediaKey }, usuarioId: req.user!.id, esperarEnvio: false });
     res.status(201).json({ id: String(fila.id) });
   } catch (err) {
     next(err);

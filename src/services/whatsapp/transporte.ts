@@ -42,7 +42,8 @@ export function sqlDeLinea(columna: string, linea: Linea) {
 
 export type ContenidoSalida =
   | { texto: string }
-  | { imagen: Buffer; mime: string; texto?: string };
+  | { imagen: Buffer; mime: string; texto?: string }
+  | { sticker: Buffer }; // WebP de 512x512
 
 export interface Transporte {
   conectado(): boolean;

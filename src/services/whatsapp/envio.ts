@@ -130,7 +130,7 @@ async function enviarAhora(t: Trabajo) {
 
   // Lo automático "escribe" un momento antes de enviar, como una persona (lo de una persona ya tardó en teclearse)
   if (t.prioridad !== 0) {
-    const largo = "texto" in t.contenido ? (t.contenido.texto?.length ?? 0) : 40;
+    const largo = "texto" in t.contenido && !("sticker" in t.contenido) ? (t.contenido.texto?.length ?? 0) : 40;
     await tr.presencia(t.jid, "composing").catch(() => {});
     await esperar(Math.min(4_000, 700 + largo * 18 + azar(0, 600)));
     await tr.presencia(t.jid, "paused").catch(() => {});
@@ -206,6 +206,8 @@ export interface OpcionesEnvio {
   autor: Exclude<Autor, "cliente" | "telefono">;
   texto?: string;
   imagen?: { buffer: Buffer; mime: string; mediaKey?: string | null };
+  /** Un sticker (WebP de 512x512). Va solo, sin texto. */
+  sticker?: { buffer: Buffer; mediaKey?: string | null };
   usuarioId?: number | null;
   turnoHasta?: string | null;
   /** false = devuelve apenas queda en cola (el panel ve el ✓ por SSE) */
@@ -225,7 +227,7 @@ export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
   const { frio } = await revisarProteccion(op, linea);
 
   const waId = generateMessageIDV2(tr.miJid() ?? undefined);
-  const tipo: TipoMensaje = op.imagen ? "imagen" : "texto";
+  const tipo: TipoMensaje = op.sticker ? "sticker" : op.imagen ? "imagen" : "texto";
 
   const fila = await guardarMensaje({
     jid: op.jid,
@@ -234,10 +236,10 @@ export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
     deMi: true,
     autor: op.autor,
     tipo,
-    texto: op.texto ?? null,
-    mediaKey: op.imagen?.mediaKey ?? null,
-    mediaMime: op.imagen?.mime ?? null,
-    mediaBytes: op.imagen?.buffer.length ?? null,
+    texto: op.sticker ? null : (op.texto ?? null),
+    mediaKey: op.sticker?.mediaKey ?? op.imagen?.mediaKey ?? null,
+    mediaMime: op.sticker ? "image/webp" : (op.imagen?.mime ?? null),
+    mediaBytes: op.sticker?.buffer.length ?? op.imagen?.buffer.length ?? null,
     estado: "pendiente",
     usuarioId: op.usuarioId ?? null,
     turnoHasta: op.turnoHasta ?? null,
@@ -245,9 +247,11 @@ export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
   if (!fila) throw new Error("No se pudo registrar el mensaje");
   anotarEnvio(op, frio);
 
-  const contenido: ContenidoSalida = op.imagen
-    ? { imagen: op.imagen.buffer, mime: op.imagen.mime, texto: op.texto }
-    : { texto: op.texto ?? "" };
+  const contenido: ContenidoSalida = op.sticker
+    ? { sticker: op.sticker.buffer }
+    : op.imagen
+      ? { imagen: op.imagen.buffer, mime: op.imagen.mime, texto: op.texto }
+      : { texto: op.texto ?? "" };
 
   const enviado = new Promise<void>((resolve, reject) => {
     cola.push({ jid: op.jid, linea, contenido, waId, prioridad: op.autor === "humano" ? 0 : 1, orden: contadorOrden++, resolve, reject });

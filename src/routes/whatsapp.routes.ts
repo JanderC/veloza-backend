@@ -10,6 +10,7 @@ import { suscribirPanel } from "../services/whatsapp/eventos";
 import {
   cerrarSesion,
   estadoConexion,
+  estadoLineas,
   iniciarConexion,
   pedirCodigoVinculacion,
   resetearSesion,
@@ -20,6 +21,7 @@ import {
   listarChats,
   listarMensajes,
   marcarLeido,
+  noLeidosPorLinea,
   obtenerChat,
   type FiltroChats,
 } from "../services/whatsapp/mensajes";
@@ -30,26 +32,43 @@ import { claveCotizacion, cotizacionesDelBot, registrarComprobante } from "../se
 import { enlaceRecibirPorWhatsapp, listarOutbox, reintentarOutbox } from "../services/whatsapp/outbox";
 import { CONFIG_POR_DEFECTO, claveDe, configSchema, guardarClave, guardarConfig, leerConfigParaPanel } from "../services/whatsapp/config";
 import { detectarProveedor, listarModelos, PROVEEDORES, probarConexion, type Proveedor } from "../services/whatsapp/ia";
-import { telefonoDeJid } from "../services/whatsapp/transporte";
+import { claveDeChat, esLinea, jidDeTelefono, telefonoDeJid, type Linea } from "../services/whatsapp/transporte";
+import { asegurarChat } from "../services/whatsapp/mensajes";
 
 export const whatsappRouter = Router();
 
-const PANEL = requireRole("ADMIN", "ASESOR");
+// Leer y responder chats: también el cajero (es quien confirma las transferencias y le avisa al cliente)
+const PANEL = requireRole("ADMIN", "ASESOR", "CAJERO");
 const SOLO_ADMIN = requireRole("ADMIN");
 
 const subida = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 function jidParam(valor: string | undefined) {
   const jid = decodeURIComponent(valor ?? "");
-  if (!/^\d{6,20}@(s\.whatsapp\.net|lid)$/.test(jid)) throw Object.assign(new Error("Chat inválido"), { status: 400 });
+  // puede traer la línea al final: "...@s.whatsapp.net#2"
+  if (!/^\d{6,20}@(s\.whatsapp\.net|lid)(#[23])?$/.test(jid)) throw Object.assign(new Error("Chat inválido"), { status: 400 });
   return jid;
+}
+
+/** La línea (teléfono vinculado) de la que se habla: ?linea= o { linea } en el cuerpo. Sin dato, la 1. */
+function lineaDe(req: { query: Record<string, unknown>; body?: unknown }): Linea {
+  const cruda = req.query.linea ?? (req.body as { linea?: unknown } | undefined)?.linea;
+  if (cruda === undefined || cruda === null || cruda === "") return 1;
+  const n = Number(cruda);
+  if (!esLinea(n)) throw Object.assign(new Error("Línea inválida"), { status: 400 });
+  return n;
+}
+
+/** El estado de las tres líneas, con su cola de envío. El QR solo lo ve el administrador. */
+function lineasParaPanel(esAdmin: boolean) {
+  return estadoLineas().map((e) => ({ ...e, qr: esAdmin ? e.qr : null, cola: estadoCola(e.linea) }));
 }
 
 // ---------- Tiempo real (SSE). EventSource no manda cabeceras: el JWT va en ?token= ----------
 whatsappRouter.get("/stream", (req, res) => {
   const usuario = typeof req.query.token === "string" ? verificarToken(req.query.token) : null;
   if (!usuario) return res.status(401).json({ error: "Token inválido o expirado" });
-  if (!["ADMIN", "ASESOR"].includes(usuario.rol)) return res.status(403).json({ error: "No tienes permiso para esta acción" });
+  if (!["ADMIN", "ASESOR", "CAJERO"].includes(usuario.rol)) return res.status(403).json({ error: "No tienes permiso para esta acción" });
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -58,7 +77,8 @@ whatsappRouter.get("/stream", (req, res) => {
     "X-Accel-Buffering": "no",
   });
   const enviar = (tipo: string, datos: unknown) => res.write(`event: ${tipo}\ndata: ${JSON.stringify(datos)}\n\n`);
-  enviar("conexion", { ...estadoConexion(), qr: usuario.rol === "ADMIN" ? estadoConexion().qr : null });
+  // el estado de cada línea al conectar
+  for (const e of estadoLineas()) enviar("conexion", { ...e, qr: usuario.rol === "ADMIN" ? e.qr : null });
 
   const desuscribir = suscribirPanel(({ tipo, datos }) => {
     if (tipo === "conexion" && usuario.rol !== "ADMIN") return enviar(tipo, { ...(datos as object), qr: null });
@@ -71,25 +91,42 @@ whatsappRouter.get("/stream", (req, res) => {
   });
 });
 
-// ---------- Conexión (solo admin) ----------
-whatsappRouter.get("/estado", requireAuth, PANEL, (req, res) => {
-  const e = estadoConexion();
-  res.json({ ...e, qr: req.user!.rol === "ADMIN" ? e.qr : null, cola: estadoCola() });
-});
-
-whatsappRouter.post("/conexion/iniciar", requireAuth, SOLO_ADMIN, async (_req, res, next) => {
+// ---------- Conexión (solo admin). Cada acción es sobre una línea: ?linea=1|2|3 ----------
+whatsappRouter.get("/estado", requireAuth, PANEL, (req, res, next) => {
   try {
-    if (estadoConexion().estado !== "CONECTADO") await iniciarConexion();
-    res.json(estadoConexion());
+    const linea = lineaDe(req);
+    const e = estadoConexion(linea);
+    res.json({ ...e, qr: req.user!.rol === "ADMIN" ? e.qr : null, cola: estadoCola(linea) });
   } catch (err) {
     next(err);
   }
 });
 
-whatsappRouter.post("/conexion/reconectar", requireAuth, SOLO_ADMIN, async (_req, res, next) => {
+// Las tres líneas de una vez, con los mensajes sin leer de cada una (campanita y pantalla de líneas)
+whatsappRouter.get("/lineas", requireAuth, PANEL, async (req, res, next) => {
   try {
-    await iniciarConexion();
-    res.json(estadoConexion());
+    const sinLeer = await noLeidosPorLinea();
+    res.json(lineasParaPanel(req.user!.rol === "ADMIN").map((l) => ({ ...l, sinLeer: sinLeer[l.linea] })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+whatsappRouter.post("/conexion/iniciar", requireAuth, SOLO_ADMIN, async (req, res, next) => {
+  try {
+    const linea = lineaDe(req);
+    if (estadoConexion(linea).estado !== "CONECTADO") await iniciarConexion(linea);
+    res.json(estadoConexion(linea));
+  } catch (err) {
+    next(err);
+  }
+});
+
+whatsappRouter.post("/conexion/reconectar", requireAuth, SOLO_ADMIN, async (req, res, next) => {
+  try {
+    const linea = lineaDe(req);
+    await iniciarConexion(linea);
+    res.json(estadoConexion(linea));
   } catch (err) {
     next(err);
   }
@@ -98,26 +135,28 @@ whatsappRouter.post("/conexion/reconectar", requireAuth, SOLO_ADMIN, async (_req
 whatsappRouter.post("/conexion/codigo", requireAuth, SOLO_ADMIN, async (req, res, next) => {
   try {
     const { numero } = z.object({ numero: z.string().min(10) }).parse(req.body);
-    const codigo = await pedirCodigoVinculacion(numero);
+    const codigo = await pedirCodigoVinculacion(numero, lineaDe(req));
     res.json({ codigo });
   } catch (err) {
     next(err);
   }
 });
 
-whatsappRouter.post("/conexion/cerrar-sesion", requireAuth, SOLO_ADMIN, async (_req, res, next) => {
+whatsappRouter.post("/conexion/cerrar-sesion", requireAuth, SOLO_ADMIN, async (req, res, next) => {
   try {
-    await cerrarSesion();
-    res.json(estadoConexion());
+    const linea = lineaDe(req);
+    await cerrarSesion(linea);
+    res.json(estadoConexion(linea));
   } catch (err) {
     next(err);
   }
 });
 
-whatsappRouter.post("/conexion/reset", requireAuth, SOLO_ADMIN, async (_req, res, next) => {
+whatsappRouter.post("/conexion/reset", requireAuth, SOLO_ADMIN, async (req, res, next) => {
   try {
-    await resetearSesion();
-    res.json(estadoConexion());
+    const linea = lineaDe(req);
+    await resetearSesion(linea);
+    res.json(estadoConexion(linea));
   } catch (err) {
     next(err);
   }
@@ -130,7 +169,29 @@ whatsappRouter.get("/chats", requireAuth, PANEL, async (req, res, next) => {
   try {
     const filtro = FILTROS.includes(req.query.filtro as FiltroChats) ? (req.query.filtro as FiltroChats) : "todos";
     const q = typeof req.query.q === "string" ? req.query.q : undefined;
-    res.json(await listarChats(filtro, q));
+    // ?linea= deja solo los chats de ese teléfono; sin ella, los de las tres
+    const linea = req.query.linea ? lineaDe(req) : undefined;
+    res.json(await listarChats(filtro, q, 200, linea));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// El chat de un teléfono en una línea: lo devuelve si existe o lo crea vacío, para escribirle desde cualquier módulo.
+// (Crear el chat no envía nada: el primer mensaje pasa por las mismas protecciones que todos.)
+whatsappRouter.post("/chats/abrir", requireAuth, PANEL, async (req, res, next) => {
+  try {
+    const d = z.object({ telefono: z.string().min(8), linea: z.number().int().optional(), nombre: z.string().max(80).optional() }).parse(req.body);
+    const linea = lineaDe({ query: {}, body: { linea: d.linea } });
+    let digitos = d.telefono.replace(/\D/g, "").replace(/^00/, "");
+    // celular colombiano o venezolano escrito sin código de país
+    if (digitos.length === 10 && digitos.startsWith("3")) digitos = `57${digitos}`;
+    if (digitos.length === 11 && digitos.startsWith("04")) digitos = `58${digitos.slice(1)}`;
+    if (digitos.length < 10) return res.status(400).json({ error: "Número inválido: incluí el código de país" });
+    const jid = claveDeChat(linea, jidDeTelefono(digitos));
+    await asegurarChat(jid, d.nombre ?? null);
+    const chat = await obtenerChat(jid);
+    res.json(await chatParaPanel(chat!));
   } catch (err) {
     next(err);
   }

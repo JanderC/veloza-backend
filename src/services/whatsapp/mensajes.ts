@@ -1,7 +1,7 @@
 import { pool } from "../../db/pool";
 import { generarUrlTemporal } from "../almacenamiento.service";
 import { emitirPanel } from "./eventos";
-import { telefonoDeJid } from "./transporte";
+import { lineaDeClave, nombreDeLinea, sqlDeLinea, telefonoDeJid, type Linea } from "./transporte";
 
 export type Autor = "cliente" | "bot" | "humano" | "telefono" | "sistema";
 export type TipoMensaje = "texto" | "imagen" | "audio" | "documento" | "sticker" | "video";
@@ -254,8 +254,12 @@ export async function chatParaPanel(c: FilaChat) {
     const r = await pool.query(`SELECT nombre FROM terceros WHERE id = $1`, [c.tercero_id]);
     terceroNombre = r.rows[0]?.nombre ?? null;
   }
+  const linea = lineaDeClave(c.jid);
   return {
     jid: c.jid,
+    // por cuál de los teléfonos vinculados es esta conversación
+    linea,
+    nombreLinea: nombreDeLinea(linea),
     telefono: c.telefono,
     nombre: c.nombre_guardado ?? terceroNombre ?? c.nombre ?? `+${c.telefono}`,
     nombreWhatsapp: c.nombre,
@@ -276,9 +280,10 @@ export async function chatParaPanel(c: FilaChat) {
 
 export type FiltroChats = "todos" | "no_leidos" | "atencion" | "bot" | "humano" | "archivados";
 
-export async function listarChats(filtro: FiltroChats, busqueda: string | undefined, limite = 200) {
+export async function listarChats(filtro: FiltroChats, busqueda: string | undefined, limite = 200, linea?: Linea) {
   const cond: string[] = [];
   const valores: unknown[] = [];
+  if (linea) cond.push(sqlDeLinea("c.jid", linea));
   if (filtro === "archivados") cond.push("c.archivado");
   else cond.push("NOT c.archivado");
   if (filtro === "no_leidos") cond.push("c.no_leidos > 0");
@@ -322,6 +327,18 @@ export async function listarMensajes(jid: string, opciones: { antesDe?: string; 
   const hayMas = r.rows.length > limite;
   const filas: FilaMensaje[] = r.rows.slice(0, limite).reverse();
   return { mensajes: filas.map(mensajeParaPanel), hayMas };
+}
+
+/** Cuántos mensajes sin leer hay en cada línea (para la campanita que se ve en todos los módulos). */
+export async function noLeidosPorLinea() {
+  const r = await pool.query(`SELECT jid, no_leidos FROM wa_chats WHERE no_leidos > 0 AND NOT archivado`);
+  const porLinea: Record<number, { mensajes: number; chats: number }> = { 1: { mensajes: 0, chats: 0 }, 2: { mensajes: 0, chats: 0 }, 3: { mensajes: 0, chats: 0 } };
+  for (const f of r.rows) {
+    const l = porLinea[lineaDeClave(f.jid)]!;
+    l.mensajes += Number(f.no_leidos);
+    l.chats++;
+  }
+  return porLinea;
 }
 
 export async function marcarLeido(jid: string) {

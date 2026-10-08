@@ -5,7 +5,7 @@ import { pool } from "../db/pool";
 import { abrirTurnoSiFalta } from "./cierreCaja.service";
 import { enviarMensaje } from "./whatsapp/envio";
 import { asegurarChat } from "./whatsapp/mensajes";
-import { jidDeTelefono } from "./whatsapp/transporte";
+import { claveDeChat, jidDeTelefono, type Linea } from "./whatsapp/transporte";
 import { generarUrlTemporal, subirArchivo } from "./almacenamiento.service";
 
 interface RegistrarMovimientoCCInput {
@@ -444,11 +444,12 @@ function telefonoConPais(telefono: string | null) {
 }
 
 /** Manda un mensaje al cliente de la cuenta por el WhatsApp conectado al sistema (ej. la confirmación de un abono). */
-export async function avisarClientePorWhatsApp(id: number, texto: string, usuarioId: number) {
+export async function avisarClientePorWhatsApp(id: number, texto: string, usuarioId: number, linea: Linea = 1) {
   const cuenta = await obtenerCuentaCorriente(id);
   const telefono = telefonoConPais(cuenta.tercero_telefono);
   if (!telefono) throw errorHttp("Este cliente no tiene un teléfono válido registrado", 400);
-  const jid = jidDeTelefono(telefono);
+  // sale por la línea elegida (Bolívares, Pesos o Dólares): cada una tiene su propio chat con el cliente
+  const jid = claveDeChat(linea, jidDeTelefono(telefono));
   await asegurarChat(jid, cuenta.tercero_nombre);
   await enviarMensaje({ jid, autor: "sistema", texto, usuarioId });
 }

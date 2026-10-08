@@ -15,7 +15,7 @@ import { leerConfig } from "./config";
 import { jidCanonico } from "./conexion";
 import { actualizarChat, actualizarEstadoMensaje, asegurarChat, guardarMensaje, notaInterna, obtenerChat, type EstadoMensaje, type TipoMensaje } from "./mensajes";
 import { guardarMediaEnMemoria } from "./mediaMemoria";
-import { transporte, telefonoDeJid } from "./transporte";
+import { claveDeChat, transporte, telefonoDeJid, type Linea } from "./transporte";
 import { esJidDelDueno, procesarMensajeDueno } from "./dueno";
 import { marcarNecesitaHumano } from "./atencion";
 import { encolarTurno } from "./bot";
@@ -80,9 +80,9 @@ function parsear(contenido: NonNullable<WAMessage["message"]>): Parseado | null 
 }
 
 /** Descarga el adjunto y lo sube a Cloudinary. Nunca se guarda base64 en la base. */
-async function subirMedia(msg: WAMessage, jid: string, mime: string) {
+async function subirMedia(msg: WAMessage, jid: string, mime: string, linea: Linea) {
   try {
-    const buffer = await transporte().descargar(msg);
+    const buffer = await transporte(linea).descargar(msg);
     const key = await subirArchivo(`whatsapp/${telefonoDeJid(jid)}`, randomUUID(), buffer, mime);
     return { buffer, key };
   } catch (err) {
@@ -96,17 +96,18 @@ function fechaDe(msg: WAMessage) {
   return ts > 0 ? new Date(ts * 1000) : new Date();
 }
 
-export async function procesarEntrantes(mensajes: WAMessage[], tipo: "notify" | "append") {
+/** linea: por cuál de los teléfonos vinculados llegó. Cada línea tiene su propia bandeja de chats. */
+export async function procesarEntrantes(mensajes: WAMessage[], tipo: "notify" | "append", linea: Linea = 1) {
   for (const msg of mensajes) {
     try {
-      await procesarUno(msg, tipo);
+      await procesarUno(msg, tipo, linea);
     } catch (err) {
       console.error("[wa] error con un mensaje entrante", err);
     }
   }
 }
 
-async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append") {
+async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append", linea: Linea) {
   const key = msg.key;
   const remoto = key.remoteJid;
   if (!remoto || isJidGroup(remoto) || isJidBroadcast(remoto) || isJidStatusBroadcast(remoto) || isJidNewsletter(remoto)) return;
@@ -115,9 +116,11 @@ async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append") {
   const p = parsear(contenido);
   if (!p) return;
 
-  const jid = await jidCanonico(remoto, key.remoteJidAlt);
+  const real = await jidCanonico(remoto, key.remoteJidAlt, linea);
+  // la clave del chat lleva la línea: el mismo cliente escribiéndole a dos teléfonos son dos conversaciones
+  const jid = claveDeChat(linea, real);
   const deMi = !!key.fromMe;
-  const esChatPropio = jid === transporte().miJid();
+  const esChatPropio = real === transporte(linea).miJid();
 
   // Eco de un mensaje nuestro: ya se guardó como "pendiente" con este mismo ID
   if (deMi && key.id) {
@@ -128,12 +131,12 @@ async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append") {
   await asegurarChat(jid, deMi ? null : msg.pushName ?? null);
 
   let media: { buffer: Buffer; key: string } | null = null;
-  if (p.conMedia && p.mime) media = await subirMedia(msg, jid, p.mime);
+  if (p.conMedia && p.mime) media = await subirMedia(msg, jid, p.mime, linea);
 
   const fila = await guardarMensaje({
     jid,
     waId: key.id ?? null,
-    waKey: { remoteJid: jid, fromMe: deMi, id: key.id, participant: key.participant ?? undefined, lid: remoto !== jid ? remoto : undefined },
+    waKey: { remoteJid: real, fromMe: deMi, id: key.id, participant: key.participant ?? undefined, lid: remoto !== real ? remoto : undefined },
     deMi,
     autor: deMi ? "telefono" : "cliente",
     tipo: p.tipo,
@@ -151,9 +154,13 @@ async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append") {
   // El historial sincronizado al vincular solo se guarda
   if (tipoUpsert !== "notify") return;
 
+  // El bot y el asistente del dueño solo existen en la línea 1. Las otras líneas son para leer y responder
+  // a mano: lo que entra queda en la bandeja y nada contesta solo.
+  const conBot = linea === 1;
+
   if (deMi) {
     // "Tú": el dueño usa el mismo número del bot y se escribe a sí mismo
-    if (esChatPropio) return procesarMensajeDueno(jid, p.texto ?? "", fila);
+    if (esChatPropio) return conBot ? procesarMensajeDueno(jid, p.texto ?? "", fila) : undefined;
     // Alguien respondió desde el teléfono del negocio: toma el control del chat
     const chat = await obtenerChat(jid);
     if (chat?.bot_activo) {
@@ -165,6 +172,7 @@ async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append") {
 
   // ---- Mensaje del cliente ----
   await liberarEsperasDeChat(jid);
+  if (!conBot) return;
   if (await esJidDelDueno(jid)) return procesarMensajeDueno(jid, p.texto ?? "", fila);
   if (p.texto) await vincularCodigoTransaccion(jid, p.texto);
 

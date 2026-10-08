@@ -299,8 +299,9 @@ cuentasCorrientesRouter.post("/:id/avisar", requireAuth, requireRole("ADMIN", "A
   try {
     const id = entero(req.params.id);
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
-    const { texto } = z.object({ texto: z.string().trim().min(1).max(2000) }).parse(req.body);
-    await avisarClientePorWhatsApp(id, texto, req.user!.id);
+    // linea: por cuál de los WhatsApp vinculados sale (1 Bolívares, 2 Pesos, 3 Dólares)
+    const { texto, linea } = z.object({ texto: z.string().trim().min(1).max(2000), linea: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(1) }).parse(req.body);
+    await avisarClientePorWhatsApp(id, texto, req.user!.id, linea);
     res.status(201).json({ ok: true });
   } catch (err) {
     next(err);

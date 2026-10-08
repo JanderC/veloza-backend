@@ -1,21 +1,39 @@
 import { generateMessageIDV2 } from "@whiskeysockets/baileys";
 import { pool } from "../../db/pool";
 import { leerConfig } from "./config";
-import { actualizarEstadoMensaje, guardarMensaje, marcarErrorMensaje, type Autor, type FilaMensaje, type TipoMensaje } from "./mensajes";
-import { transporte, type ContenidoSalida } from "./transporte";
+import { actualizarEstadoMensaje, guardarMensaje, marcarErrorMensaje, obtenerChat, type Autor, type FilaMensaje, type TipoMensaje } from "./mensajes";
+import { LINEAS, lineaDeClave, nombreDeLinea, sqlDeLinea, telefonoDeJid, transporte, type ContenidoSalida, type Linea } from "./transporte";
 
-// UNA sola cola de envío para todo lo que sale por WhatsApp (anti-bloqueo):
-// - tope por minuto: si se llena, ESPERA
-// - tope por día: falla con un mensaje claro
-// - pausas aleatorias entre mensajes
-// - lo que escribe una persona pasa delante del bot
+// UNA sola puerta de salida para todo lo que se envía por WhatsApp. Todo pasa por acá: lo que escribe una persona
+// en el panel o en la burbuja, los avisos de las confirmaciones y el bot. Acá viven las protecciones para que Meta
+// no bloquee los teléfonos vinculados. Los topes se llevan por línea: a Meta le importa cada número por separado.
+//
+// Antes de aceptar un mensaje:
+//  - Cliente que YA escribió (conversación abierta por él): se le responde con normalidad.
+//  - Cliente que NUNCA escribió a esa línea: se le manda UN solo mensaje. Hasta que conteste no sale otro.
+//    Antes de ese primer mensaje se verifica que el número tenga WhatsApp.
+//  - El mismo texto a varios clientes que nunca escribieron, seguidos: se corta (es lo que parece difusión).
+//  - Una ráfaga exagerada al mismo chat: se corta.
+// Al enviar:
+//  - tope por minuto (si se llena, ESPERA) y tope por día (falla con un mensaje claro)
+//  - pausas aleatorias entre mensajes y "escribiendo…" antes de los que no escribe una persona
+//  - lo que escribe una persona pasa delante de los avisos automáticos
 
 export class ErrorEnvio extends Error {
   status = 409;
+  /** El cliente todavía no respondió: no es un error para reintentar, hay que esperar a que escriba. */
+  esperaCliente = false;
+}
+
+function rechazo(mensaje: string, esperaCliente = false) {
+  const e = new ErrorEnvio(mensaje);
+  e.esperaCliente = esperaCliente;
+  return e;
 }
 
 interface Trabajo {
   jid: string;
+  linea: Linea;
   contenido: ContenidoSalida;
   waId: string;
   prioridad: number; // 0 = persona, 1 = bot/sistema
@@ -27,26 +45,41 @@ interface Trabajo {
 const cola: Trabajo[] = [];
 let procesando = false;
 let contadorOrden = 0;
-const enviosUltimoMinuto: number[] = [];
-let ultimoEnvio = 0;
-const conteoDia = { fecha: "", n: 0 };
+
+// Ritmo de cada línea
+interface Ritmo {
+  ultimoMinuto: number[];
+  ultimoEnvio: number;
+  dia: { fecha: string; n: number };
+}
+const ritmos = new Map<Linea, Ritmo>(LINEAS.map((l) => [l.id, { ultimoMinuto: [], ultimoEnvio: 0, dia: { fecha: "", n: 0 } }]));
+const ritmo = (linea: Linea) => ritmos.get(linea)!;
+
+// Para detectar difusión y ráfagas (en memoria: alcanza con lo de los últimos minutos)
+const RAFAGA_POR_CHAT = 15; // mensajes al mismo chat en un minuto
+const IGUALES_A_FRIOS = 3; // mismo texto a clientes que nunca escribieron...
+const VENTANA_IGUALES_MS = 30 * 60_000; // ...en media hora
+const enviosPorChat = new Map<string, number[]>();
+const textosAFrios = new Map<string, { jid: string; en: number }[]>();
 
 const esperar = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const azar = (min: number, max: number) => min + Math.random() * Math.max(0, max - min);
+const normalizar = (texto: string) => texto.toLowerCase().replace(/\s+/g, " ").trim();
 
-async function enviadosHoy(zona: string) {
+async function enviadosHoy(linea: Linea, zona: string) {
+  const r = ritmo(linea);
   const hoy = new Intl.DateTimeFormat("en-CA", { timeZone: zona }).format(new Date());
-  if (conteoDia.fecha !== hoy) {
-    const r = await pool.query(
+  if (r.dia.fecha !== hoy) {
+    const q = await pool.query(
       `SELECT count(*)::int AS n FROM wa_mensajes
        WHERE de_mi AND NOT interno AND autor <> 'telefono' AND estado <> 'error'
+         AND ${sqlDeLinea("jid", linea)}
          AND (created_at AT TIME ZONE $1)::date = $2::date`,
       [zona, hoy]
     );
-    conteoDia.fecha = hoy;
-    conteoDia.n = r.rows[0].n;
+    r.dia = { fecha: hoy, n: q.rows[0].n };
   }
-  return conteoDia;
+  return r.dia;
 }
 
 async function procesarCola() {
@@ -72,35 +105,103 @@ async function procesarCola() {
 async function enviarAhora(t: Trabajo) {
   const config = await leerConfig();
   const ab = config.antibloqueo;
+  const r = ritmo(t.linea);
 
-  const dia = await enviadosHoy(config.negocio.zonaHoraria);
+  const dia = await enviadosHoy(t.linea, config.negocio.zonaHoraria);
   if (dia.n >= ab.porDia) {
-    throw new ErrorEnvio(`Se alcanzó el tope diario de ${ab.porDia} mensajes. Se puede subir en Configuración > Anti-bloqueo.`);
+    throw rechazo(`La línea ${nombreDeLinea(t.linea)} alcanzó el tope diario de ${ab.porDia} mensajes. Se puede subir en Bot e IA > Anti-bloqueo.`);
   }
 
   // Tope por minuto: esperar a que se libere un lugar
   for (;;) {
     const ahora = Date.now();
-    while (enviosUltimoMinuto.length && ahora - enviosUltimoMinuto[0]! > 60_000) enviosUltimoMinuto.shift();
-    if (enviosUltimoMinuto.length < ab.porMinuto) break;
-    await esperar(60_000 - (ahora - enviosUltimoMinuto[0]!) + 50);
+    while (r.ultimoMinuto.length && ahora - r.ultimoMinuto[0]! > 60_000) r.ultimoMinuto.shift();
+    if (r.ultimoMinuto.length < ab.porMinuto) break;
+    await esperar(60_000 - (ahora - r.ultimoMinuto[0]!) + 50);
   }
 
-  // Pausa aleatoria desde el envío anterior (las personas esperan menos)
+  // Pausa aleatoria desde el envío anterior de esa línea (las personas esperan menos)
   const pausa = t.prioridad === 0 ? azar(300, 900) : azar(ab.pausaMinMs, ab.pausaMaxMs);
-  const falta = ultimoEnvio + pausa - Date.now();
+  const falta = r.ultimoEnvio + pausa - Date.now();
   if (falta > 0) await esperar(falta);
 
-  const tr = transporte();
-  if (!tr.conectado()) throw new ErrorEnvio("WhatsApp no está conectado");
+  const tr = transporte(t.linea);
+  if (!tr.conectado()) throw rechazo(`La línea ${nombreDeLinea(t.linea)} no está conectada`);
+
+  // Lo automático "escribe" un momento antes de enviar, como una persona (lo de una persona ya tardó en teclearse)
+  if (t.prioridad !== 0) {
+    const largo = "texto" in t.contenido ? (t.contenido.texto?.length ?? 0) : 40;
+    await tr.presencia(t.jid, "composing").catch(() => {});
+    await esperar(Math.min(4_000, 700 + largo * 18 + azar(0, 600)));
+    await tr.presencia(t.jid, "paused").catch(() => {});
+  }
+
   const key = await tr.enviar(t.jid, t.contenido, t.waId);
-  ultimoEnvio = Date.now();
-  enviosUltimoMinuto.push(ultimoEnvio);
+  r.ultimoEnvio = Date.now();
+  r.ultimoMinuto.push(r.ultimoEnvio);
   dia.n++;
   await actualizarEstadoMensaje(key?.id ?? t.waId, "enviado");
 }
 
+/**
+ * Las reglas que se revisan ANTES de aceptar el mensaje. Si no pasa, no se guarda ni se intenta enviar.
+ * Devuelve si el contacto es "frío" (nunca le escribió a esa línea).
+ */
+async function revisarProteccion(op: OpcionesEnvio, linea: Linea): Promise<{ frio: boolean }> {
+  const ahora = Date.now();
+
+  // Ráfaga al mismo chat
+  const delChat = (enviosPorChat.get(op.jid) ?? []).filter((t) => ahora - t < 60_000);
+  if (delChat.length >= RAFAGA_POR_CHAT) throw rechazo("Demasiados mensajes seguidos a este chat: esperá un momento antes de mandar otro.");
+
+  const chat = await obtenerChat(op.jid);
+  const frio = !chat?.ultimo_entrante_en;
+  if (!frio) return { frio: false };
+
+  // Nunca nos escribió: un solo mensaje hasta que responda
+  const previos = await pool.query(`SELECT count(*)::int AS n FROM wa_mensajes WHERE jid = $1 AND de_mi AND NOT interno AND estado <> 'error'`, [op.jid]);
+  if (previos.rows[0].n > 0) {
+    throw rechazo(
+      "A este cliente ya se le envió un mensaje y todavía no respondió. Para cuidar el número no se le escribe otra vez hasta que conteste: cuando escriba, se le responde sin límite.",
+      true
+    );
+  }
+
+  // El mismo texto a varios que nunca escribieron: eso es lo que WhatsApp toma por difusión
+  const texto = normalizar(op.texto ?? "");
+  if (texto.length >= 12) {
+    const iguales = (textosAFrios.get(texto) ?? []).filter((x) => ahora - x.en < VENTANA_IGUALES_MS);
+    const otros = new Set(iguales.map((x) => x.jid).filter((j) => j !== op.jid));
+    if (otros.size >= IGUALES_A_FRIOS) {
+      throw rechazo("Ese mismo mensaje ya se le mandó a varios clientes que nunca escribieron. Para que WhatsApp no lo tome como difusión, cambiá el texto o esperá un rato.");
+    }
+  }
+
+  // Que el número exista antes de escribirle (escribirle a números sin WhatsApp también cuenta en contra)
+  let existe: string | null;
+  try {
+    existe = await transporte(linea).existe(telefonoDeJid(op.jid));
+  } catch {
+    throw rechazo("No se pudo comprobar si ese número tiene WhatsApp. Probá de nuevo en un momento.");
+  }
+  if (!existe) throw Object.assign(rechazo("Ese número no tiene WhatsApp."), { status: 400 });
+  return { frio: true };
+}
+
+function anotarEnvio(op: OpcionesEnvio, frio: boolean) {
+  const ahora = Date.now();
+  enviosPorChat.set(op.jid, [...(enviosPorChat.get(op.jid) ?? []).filter((t) => ahora - t < 60_000), ahora]);
+  if (frio) {
+    const texto = normalizar(op.texto ?? "");
+    if (texto.length >= 12) textosAFrios.set(texto, [...(textosAFrios.get(texto) ?? []).filter((x) => ahora - x.en < VENTANA_IGUALES_MS), { jid: op.jid, en: ahora }]);
+  }
+  // limpieza ocasional para que los mapas no crezcan sin fin
+  if (enviosPorChat.size > 2_000) for (const [k, v] of enviosPorChat) if (!v.some((t) => ahora - t < 60_000)) enviosPorChat.delete(k);
+  if (textosAFrios.size > 500) for (const [k, v] of textosAFrios) if (!v.some((x) => ahora - x.en < VENTANA_IGUALES_MS)) textosAFrios.delete(k);
+}
+
 export interface OpcionesEnvio {
+  /** La clave del chat: dice a quién y por cuál línea sale */
   jid: string;
   autor: Exclude<Autor, "cliente" | "telefono">;
   texto?: string;
@@ -117,15 +218,19 @@ export interface OpcionesEnvio {
  * Resuelve cuando salió (o rechaza con el motivo).
  */
 export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
-  const tr = transporte();
-  if (!tr.conectado()) throw Object.assign(new Error("WhatsApp no está conectado"), { status: 503 });
+  const linea = lineaDeClave(op.jid);
+  const tr = transporte(linea);
+  if (!tr.conectado()) throw Object.assign(new Error(`La línea ${nombreDeLinea(linea)} de WhatsApp no está conectada`), { status: 503 });
+
+  const { frio } = await revisarProteccion(op, linea);
+
   const waId = generateMessageIDV2(tr.miJid() ?? undefined);
   const tipo: TipoMensaje = op.imagen ? "imagen" : "texto";
 
   const fila = await guardarMensaje({
     jid: op.jid,
     waId,
-    waKey: { remoteJid: op.jid, fromMe: true, id: waId },
+    waKey: { remoteJid: op.jid.split("#")[0], fromMe: true, id: waId },
     deMi: true,
     autor: op.autor,
     tipo,
@@ -138,13 +243,14 @@ export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
     turnoHasta: op.turnoHasta ?? null,
   });
   if (!fila) throw new Error("No se pudo registrar el mensaje");
+  anotarEnvio(op, frio);
 
   const contenido: ContenidoSalida = op.imagen
     ? { imagen: op.imagen.buffer, mime: op.imagen.mime, texto: op.texto }
     : { texto: op.texto ?? "" };
 
   const enviado = new Promise<void>((resolve, reject) => {
-    cola.push({ jid: op.jid, contenido, waId, prioridad: op.autor === "humano" ? 0 : 1, orden: contadorOrden++, resolve, reject });
+    cola.push({ jid: op.jid, linea, contenido, waId, prioridad: op.autor === "humano" ? 0 : 1, orden: contadorOrden++, resolve, reject });
     void procesarCola();
   });
   if (op.esperarEnvio === false) {
@@ -156,6 +262,7 @@ export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
 }
 
 /** Para pruebas y para el estado del panel. */
-export function estadoCola() {
-  return { enCola: cola.length, enviadosUltimoMinuto: enviosUltimoMinuto.length, enviadosHoy: conteoDia.n };
+export function estadoCola(linea: Linea = 1) {
+  const r = ritmo(linea);
+  return { enCola: cola.filter((t) => t.linea === linea).length, enviadosUltimoMinuto: r.ultimoMinuto.length, enviadosHoy: r.dia.n };
 }

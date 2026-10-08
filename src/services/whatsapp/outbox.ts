@@ -3,10 +3,10 @@ import { pool } from "../../db/pool";
 import { generarUrlTemporal } from "../almacenamiento.service";
 import { ahoraLocal, enRango, leerConfig } from "./config";
 import { emitirPanel } from "./eventos";
-import { enviarMensaje } from "./envio";
+import { enviarMensaje, ErrorEnvio } from "./envio";
 import { asegurarChat, guardarEstadoConversacion, notaInterna, obtenerChat } from "./mensajes";
 import { formatearMonto } from "./herramientas";
-import { jidDeTelefono, telefonoDeJid, transporte } from "./transporte";
+import { algunaLineaConectada, jidDeTelefono, lineaDeClave, nombreDeLinea, sqlDeLinea, transporte } from "./transporte";
 
 // Envíos salientes (recibos, confirmaciones, avisos). Nunca se mandan en la misma petición
 // HTTP: se guardan acá y un trabajador los envía con reintentos y espera creciente.
@@ -79,7 +79,7 @@ async function reprogramar(id: string, estado: EstadoOutbox, cuando: Date | null
 let trabajando = false;
 
 export async function trabajarOutbox() {
-  if (trabajando || !transporte().conectado()) return;
+  if (trabajando || !algunaLineaConectada()) return;
   trabajando = true;
   try {
     for (;;) {
@@ -93,7 +93,7 @@ export async function trabajarOutbox() {
       if (!item) break;
       await emitir(item.id);
       await procesarItem(item);
-      if (!transporte().conectado()) break;
+      if (!algunaLineaConectada()) break;
     }
   } catch (err) {
     console.error("[outbox] error del trabajador", err);
@@ -105,6 +105,11 @@ export async function trabajarOutbox() {
 async function procesarItem(item: FilaOutbox) {
   const config = await leerConfig();
   const ab = config.antibloqueo;
+  // cada envío sale por la línea de su chat: si esa línea no está conectada, espera sin frenar a las demás
+  const linea = lineaDeClave(item.jid);
+  if (!transporte(linea).conectado()) {
+    return reprogramar(item.id, "EN_COLA", new Date(Date.now() + 60_000), `La línea ${nombreDeLinea(linea)} no está conectada`);
+  }
   const chat = await obtenerChat(item.jid);
   const frio = !chat?.ultimo_entrante_en;
 
@@ -117,7 +122,7 @@ async function procesarItem(item: FilaOutbox) {
     // Tope diario de contactos fríos: esperan a que el cliente escriba
     const hoy = await pool.query(
       `SELECT count(*)::int AS n, max(enviado_en) AS ultimo FROM wa_outbox
-       WHERE frio AND estado = 'ENVIADO' AND enviado_en > now() - interval '24 hours'`
+       WHERE frio AND estado = 'ENVIADO' AND enviado_en > now() - interval '24 hours' AND ${sqlDeLinea("jid", linea)}`
     );
     if (hoy.rows[0].n >= ab.friosPorDia) {
       return reprogramar(item.id, "ESPERA_CLIENTE", null, "Tope diario de contactos nuevos: sale en cuanto el cliente escriba");
@@ -128,14 +133,7 @@ async function procesarItem(item: FilaOutbox) {
     if (Date.now() - ultimo < pausa) {
       return reprogramar(item.id, "EN_COLA", new Date(ultimo + pausa), null);
     }
-    // Que el número exista antes de escribirle
-    let existe: string | null;
-    try {
-      existe = await transporte().existe(telefonoDeJid(item.jid));
-    } catch (err) {
-      return reprogramar(item.id, "EN_COLA", new Date(Date.now() + 60_000), (err as Error).message);
-    }
-    if (!existe) return reprogramar(item.id, "ERROR", null, "Ese número no tiene WhatsApp");
+    // (que el número exista y que solo salga UN mensaje hasta que responda lo revisa enviarMensaje)
     await asegurarChat(item.jid);
   }
 
@@ -152,7 +150,11 @@ async function procesarItem(item: FilaOutbox) {
   } catch (err) {
     const intentos = item.intentos + 1;
     const mensaje = (err as Error).message;
-    if (!transporte().conectado()) return reprogramar(item.id, "EN_COLA", new Date(Date.now() + 30_000), mensaje);
+    // ya se le escribió y no respondió: no se insiste; sale cuando el cliente escriba
+    if (err instanceof ErrorEnvio && err.esperaCliente) return reprogramar(item.id, "ESPERA_CLIENTE", null, mensaje);
+    // el número no tiene WhatsApp: reintentar no lo arregla
+    if ((err as { status?: number }).status === 400) return reprogramar(item.id, "ERROR", null, mensaje);
+    if (!transporte(linea).conectado()) return reprogramar(item.id, "EN_COLA", new Date(Date.now() + 30_000), mensaje);
     if (intentos >= MAX_INTENTOS) return reprogramar(item.id, "ERROR", null, mensaje, true);
     const espera = Math.min(60, 2 ** intentos) * 60_000;
     return reprogramar(item.id, "EN_COLA", new Date(Date.now() + espera), mensaje, true);

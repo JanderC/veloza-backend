@@ -136,9 +136,14 @@ const crearCuentaSchema = z
   })
   .refine((d) => d.terceroId !== undefined || d.nuevoTercero !== undefined, { message: "Elegí un tercero o creá uno nuevo" });
 
-cuentasCorrientesRouter.post("/", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+cuentasCorrientesRouter.post("/", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
   try {
     const data = crearCuentaSchema.parse(req.body);
+    // El cajero no crea clientes ni cuentas. Lo único que puede: a un cliente de Confirmaciones que ya existe, usarle
+    // (o abrirle) su cuenta en otra moneda, para registrar un movimiento que se le entrega en esa moneda.
+    if (req.user!.rol === "CAJERO" && !(data.modulo === "CAJA" && data.usarExistente && data.terceroId !== undefined && data.saldoInicial === undefined)) {
+      return res.status(403).json({ error: "No tenés permiso para crear cuentas" });
+    }
     res.status(201).json(await crearCuentaCorriente({ ...data, usuarioId: req.user!.id }));
   } catch (err) {
     next(err);

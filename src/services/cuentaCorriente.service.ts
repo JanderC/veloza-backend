@@ -644,6 +644,18 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
           )
         ).rows[0] ?? null
       : null;
+  // ...y todos los cierres que se hicieron ese día, en orden (puede haber varios: uno al mediodía, otro a la tarde)
+  const cierres =
+    filtros.desde && filtros.desde === filtros.hasta
+      ? (
+          await pool.query(
+            `SELECT c.id, c.saldo_final, c.created_at, u.nombre AS usuario_nombre
+             FROM cierres_cuenta_corriente_tramos c JOIN usuarios u ON u.id = c.usuario_id
+             WHERE c.cuenta_corriente_id = $1 AND c.dia = $2::date ORDER BY c.created_at, c.id`,
+            [id, filtros.desde]
+          )
+        ).rows
+      : [];
   // Lo enviado por el cliente en toda la historia de la cuenta, y cuánto de eso todavía no se le pagó
   const envios = await pool.query(
     `SELECT COALESCE(sum(abs(cantidad_base)), 0) AS total,
@@ -655,6 +667,7 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
   return {
     cuenta,
     cierre,
+    cierres,
     enviado: enviado.toFixed(4),
     enviadoTotal: new Decimal(envios.rows[0].total).toFixed(4),
     enviadoPorPagar: new Decimal(envios.rows[0].por_pagar).toFixed(4),
@@ -674,6 +687,8 @@ export async function cerrarDiaCuentaCorriente(id: number, dia: string, usuarioI
      ON CONFLICT (cuenta_corriente_id, dia) DO UPDATE SET saldo_final = EXCLUDED.saldo_final, usuario_id = EXCLUDED.usuario_id, created_at = now()`,
     [id, dia, saldoFinal, usuarioId]
   );
+  // cada cierre queda anotado aparte: el reporte de un cierre lleva solo lo que entró desde el anterior
+  await pool.query(`INSERT INTO cierres_cuenta_corriente_tramos (cuenta_corriente_id, dia, saldo_final, usuario_id) VALUES ($1, $2::date, $3, $4)`, [id, dia, saldoFinal, usuarioId]);
   return obtenerEstadoCuenta(id, { desde: dia, hasta: dia });
 }
 

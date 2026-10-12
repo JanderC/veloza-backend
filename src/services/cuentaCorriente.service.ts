@@ -911,6 +911,41 @@ export async function editarMovimientoCuentaCorriente(
   }
 }
 
+/**
+ * Volver a activar un movimiento anulado (solo administradores): se quita el movimiento contrario que dejó la
+ * anulación, el original deja de estar anulado y el saldo vuelve a contarlo. Después se puede editar como cualquiera.
+ * Si la anulación también devolvió plata a una caja, no se reactiva acá: se carga de nuevo.
+ */
+export async function reactivarMovimientoCuentaCorriente(movimientoId: number, usuarioId: number) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const previo = await client.query(`SELECT cuenta_corriente_id FROM movimientos_cuenta_corriente WHERE id = $1`, [movimientoId]);
+    if (!previo.rows[0]) throw errorHttp("Movimiento no encontrado", 404);
+    const cuentaId = previo.rows[0].cuenta_corriente_id as number;
+    await client.query(`SELECT id FROM cuentas_corrientes WHERE id = $1 FOR UPDATE`, [cuentaId]);
+    const m = (await client.query(`SELECT * FROM movimientos_cuenta_corriente WHERE id = $1 FOR UPDATE`, [movimientoId])).rows[0];
+    if (m.reverso_de_id) throw errorHttp("Ese es el movimiento contrario de una anulación: se reactiva el original", 409);
+    if (!m.anulado) throw errorHttp("Ese movimiento no está anulado", 409);
+    const reversos = (await client.query(`SELECT * FROM movimientos_cuenta_corriente WHERE reverso_de_id = $1 ORDER BY id FOR UPDATE`, [movimientoId])).rows;
+    if (reversos.some((r) => r.movimiento_caja_id) || m.movimiento_caja_id) throw errorHttp("Este movimiento movió una caja y al anularlo la plata volvió: no se reactiva. Cargalo de nuevo.", 409);
+    for (const r of [...reversos].reverse()) {
+      // sin el contrario, lo cargado después (y el saldo de la cuenta) vuelve a contar el movimiento original
+      await client.query(`DELETE FROM movimientos_cuenta_corriente WHERE id = $1`, [r.id]);
+      await client.query(`UPDATE movimientos_cuenta_corriente SET saldo_anterior = saldo_anterior - $1, saldo_nuevo = saldo_nuevo - $1 WHERE cuenta_corriente_id = $2 AND id > $3`, [r.monto, cuentaId, r.id]);
+      await client.query(`UPDATE cuentas_corrientes SET saldo_actual = saldo_actual - $1 WHERE id = $2`, [r.monto, cuentaId]);
+    }
+    await client.query(`UPDATE movimientos_cuenta_corriente SET anulado = false, editado_en = now(), editado_por = $2 WHERE id = $1`, [movimientoId, usuarioId]);
+    await client.query("COMMIT");
+    return { id: movimientoId, reactivado: true };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 export async function anularMovimiento(movimientoId: number, usuarioId: number) {
   const r = await pool.query(
     `SELECT mc.*, cc.tercero_id, cc.canal_id, cc.moneda_id, mcaja.caja_id, mcaja.moneda_id AS caja_moneda_id, mcaja.tipo AS caja_tipo,

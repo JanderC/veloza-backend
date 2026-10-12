@@ -7,6 +7,7 @@ import {
   actualizarCanal,
   anularMovimiento,
   editarMovimientoCuentaCorriente,
+  reactivarMovimientoCuentaCorriente,
   avisarClientePorWhatsApp,
   buscarMovimientoPorNumero,
   cambiarEstadoCuentaCorriente,
@@ -422,6 +423,17 @@ cuentasCorrientesRouter.put("/movimientos/:id", requireAuth, requireRole("ADMIN"
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
     res.json(await editarMovimientoCuentaCorriente(id, editarMovimientoSchema.parse(req.body), req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Volver a activar un movimiento anulado: solo administradores
+cuentasCorrientesRouter.post("/movimientos/:id/reactivar", requireAuth, requireRole("ADMIN"), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    res.json(await reactivarMovimientoCuentaCorriente(id, req.user!.id));
   } catch (err) {
     next(err);
   }

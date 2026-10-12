@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import {
   actualizarCanal,
   anularMovimiento,
+  editarMovimientoCuentaCorriente,
   avisarClientePorWhatsApp,
   buscarMovimientoPorNumero,
   cambiarEstadoCuentaCorriente,
@@ -405,6 +406,25 @@ const movimientoSchema = z.object({
   montoCaja: z.string().optional(),
   monedaCajaId: z.number().int().optional(),
   metodoPagoId: z.number().int().optional(),
+});
+
+// Corregir un movimiento mal cargado: solo administradores
+const editarMovimientoSchema = z.object({
+  descripcion: z.string().trim().min(1).max(300).optional(),
+  fecha: z.string().datetime({ offset: true }).optional(),
+  cuentaDestino: z.string().max(120).nullable().optional(),
+  cantidadBase: z.string().nullable().optional(),
+  tasa: z.string().nullable().optional(),
+  monto: z.string().optional(),
+});
+cuentasCorrientesRouter.put("/movimientos/:id", requireAuth, requireRole("ADMIN"), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    res.json(await editarMovimientoCuentaCorriente(id, editarMovimientoSchema.parse(req.body), req.user!.id));
+  } catch (err) {
+    next(err);
+  }
 });
 
 cuentasCorrientesRouter.post(

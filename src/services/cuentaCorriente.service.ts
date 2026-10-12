@@ -604,9 +604,10 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
        FROM movimientos_cuenta_corriente mc WHERE mc.cuenta_corriente_id = $1
      )
      SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.comision_descontada, c.comision_incluida, c.estado_confirmacion, (c.comprobante_key IS NOT NULL) AS tiene_comprobante, c.pagado_en, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
-            c.movimiento_caja_id, c.created_at, u.nombre AS usuario_nombre, mb.codigo AS moneda_base_codigo, cat.nombre AS categoria_nombre
+            c.movimiento_caja_id, c.created_at, c.editado_en, ue.nombre AS editado_por_nombre, u.nombre AS usuario_nombre, mb.codigo AS moneda_base_codigo, cat.nombre AS categoria_nombre
      FROM corridos c
      JOIN usuarios u ON u.id = c.usuario_id
+     LEFT JOIN usuarios ue ON ue.id = c.editado_por
      LEFT JOIN monedas mb ON mb.id = c.moneda_base_id
      LEFT JOIN categorias_movimiento cat ON cat.id = c.categoria_id
      WHERE ($2::date IS NULL OR ${dia.replace("fecha", "c.fecha")} >= $2::date)
@@ -834,6 +835,82 @@ export async function confirmarMovimiento(movimientoId: number) {
 }
 
 /** Un error no se borra: se registra el movimiento contrario (y el de caja, si lo hubo). */
+/**
+ * Corregir un movimiento mal cargado (solo administradores): la referencia, la fecha, la cuenta a la que se pagó, la
+ * cantidad, la tasa y el monto. Si cambia el monto, se corre el saldo de los movimientos posteriores y el de la cuenta.
+ * No se edita un movimiento anulado ni un reverso. El monto no se toca si el movimiento ya movió una caja o ya se
+ * pagó en taquilla (ahí la plata ya se movió): eso se anula y se vuelve a cargar.
+ */
+export async function editarMovimientoCuentaCorriente(
+  movimientoId: number,
+  cambios: { descripcion?: string; fecha?: string; cuentaDestino?: string | null; cantidadBase?: string | null; tasa?: string | null; monto?: string },
+  usuarioId: number
+) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const previo = await client.query(`SELECT cuenta_corriente_id FROM movimientos_cuenta_corriente WHERE id = $1`, [movimientoId]);
+    if (!previo.rows[0]) throw errorHttp("Movimiento no encontrado", 404);
+    // primero la cuenta (como al registrar), después el movimiento
+    await client.query(`SELECT id FROM cuentas_corrientes WHERE id = $1 FOR UPDATE`, [previo.rows[0].cuenta_corriente_id]);
+    const m = (await client.query(`SELECT * FROM movimientos_cuenta_corriente WHERE id = $1 FOR UPDATE`, [movimientoId])).rows[0];
+    if (m.anulado || m.reverso_de_id) throw errorHttp("Un movimiento anulado (o su reverso) no se edita", 409);
+
+    const montoAntes = new Decimal(m.monto);
+    const monto = cambios.monto !== undefined ? aDecimal(cambios.monto, "El monto") : montoAntes;
+    if (monto.isZero()) throw errorHttp("El monto no puede quedar en cero: si el movimiento no va, anulalo", 400);
+    const delta = monto.minus(montoAntes);
+    if (!delta.isZero()) {
+      if (m.movimiento_caja_id) throw errorHttp("Este movimiento también movió una caja: el monto no se edita. Anulalo y cargalo de nuevo.", 409);
+      if (m.pagado_en) throw errorHttp("Este movimiento ya se pagó en taquilla: el monto no se edita.", 409);
+      const esPago = await client.query(`SELECT 1 FROM movimientos_cuenta_corriente WHERE pagado_movimiento_id = $1 LIMIT 1`, [movimientoId]);
+      if (esPago.rows[0]) throw errorHttp("Este movimiento es el pago de otro en taquilla: el monto no se edita.", 409);
+    }
+    // la cantidad lleva el mismo signo que el monto, como al registrar; la tasa siempre va en positivo
+    const signo = monto.isNegative() ? -1 : 1;
+    const cantidad =
+      cambios.cantidadBase === undefined
+        ? m.cantidad_base == null
+          ? null
+          : new Decimal(m.cantidad_base).abs().times(signo)
+        : cambios.cantidadBase === null
+          ? null
+          : aDecimal(cambios.cantidadBase, "La cantidad").abs().times(signo);
+    const tasa = cambios.tasa === undefined ? (m.tasa == null ? null : new Decimal(m.tasa)) : cambios.tasa === null ? null : aDecimal(cambios.tasa, "La tasa").abs();
+    if (tasa && tasa.isZero()) throw errorHttp("La tasa no puede ser cero", 400);
+    const descripcion = cambios.descripcion !== undefined ? cambios.descripcion.trim() : m.descripcion;
+    if (cambios.descripcion !== undefined && !descripcion) throw errorHttp("Escribí la referencia del movimiento", 400);
+    const fecha = cambios.fecha !== undefined ? new Date(cambios.fecha) : new Date(m.fecha);
+    if (Number.isNaN(fecha.getTime())) throw errorHttp("La fecha no es válida", 400);
+    if (fecha.getTime() > Date.now() + 5 * 60_000) throw errorHttp("La fecha no puede ser futura", 400);
+    const cuentaDestino = cambios.cuentaDestino !== undefined ? cambios.cuentaDestino?.trim() || null : m.cuenta_destino;
+
+    await client.query(
+      `UPDATE movimientos_cuenta_corriente
+       SET descripcion = $2, fecha = $3, cuenta_destino = $4, cantidad_base = $5, tasa = $6, monto = $7, saldo_nuevo = saldo_anterior + $7::numeric,
+           editado_en = now(), editado_por = $8
+       WHERE id = $1`,
+      [movimientoId, descripcion, fecha.toISOString(), cuentaDestino, cantidad ? cantidad.toFixed(8) : null, tasa ? tasa.toFixed(8) : null, monto.toFixed(4), usuarioId]
+    );
+    if (!delta.isZero()) {
+      // el saldo corrido se guarda en el orden en que se cargaron: lo posterior se corre lo que cambió el monto
+      await client.query(`UPDATE movimientos_cuenta_corriente SET saldo_anterior = saldo_anterior + $1, saldo_nuevo = saldo_nuevo + $1 WHERE cuenta_corriente_id = $2 AND id > $3`, [
+        delta.toFixed(4),
+        m.cuenta_corriente_id,
+        movimientoId,
+      ]);
+      await client.query(`UPDATE cuentas_corrientes SET saldo_actual = saldo_actual + $1 WHERE id = $2`, [delta.toFixed(4), m.cuenta_corriente_id]);
+    }
+    await client.query("COMMIT");
+    return { id: movimientoId, monto: monto.toFixed(4), cambio: delta.toFixed(4) };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 export async function anularMovimiento(movimientoId: number, usuarioId: number) {
   const r = await pool.query(
     `SELECT mc.*, cc.tercero_id, cc.canal_id, cc.moneda_id, mcaja.caja_id, mcaja.moneda_id AS caja_moneda_id, mcaja.tipo AS caja_tipo,

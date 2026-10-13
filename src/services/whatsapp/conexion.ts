@@ -17,6 +17,7 @@ import { borrarSesion, haySesionGuardada, usarSesionBd } from "./sesionBd";
 import { LINEAS, claveDeChat, jidReal, nombreDeLinea, usarTransporte, type Linea, type Transporte } from "./transporte";
 import { actualizarChat, asegurarChat, obtenerChat } from "./mensajes";
 import { procesarActualizaciones, procesarEntrantes } from "./entrantes";
+import { marcarArchivadoDesdeWhatsapp } from "./archivado";
 
 // Ciclo de vida del socket de Baileys, uno por línea (teléfono vinculado):
 // - fallas de red: reintento sin límite con espera creciente (máx. 60 s), NUNCA se borra la sesión
@@ -136,6 +137,7 @@ function crearTransporte(linea: Linea, s: WASocket): Transporte {
       return encontrado ? jidNormalizedUser(encontrado.jid) : null;
     },
     descargar: (msg) => descargarMedia(msg, linea),
+    archivar: (jid, archivado, ultimo) => s.chatModify({ archive: archivado, lastMessages: [ultimo] }, jidReal(jid)),
   };
 }
 
@@ -217,6 +219,21 @@ export async function iniciarConexion(linea: Linea = 1): Promise<void> {
     if (!vigente()) return;
     for (const g of cambios) if (g.id && g.subject) void anotarGrupo(linea, g.id, g.subject).catch(() => {});
   });
+
+  // Archivados: WhatsApp avisa cuando un chat se archiva o se desarchiva desde el teléfono (o desde acá). Es de la
+  // cuenta, no de cada dispositivo, así que la bandeja queda igual que el teléfono de esa línea.
+  const alCambiarChats = (chats: { id?: string | null; archived?: boolean | null }[], soloArchivados = false) => {
+    if (!vigente()) return;
+    for (const c of chats) {
+      if (!c.id || typeof c.archived !== "boolean") continue;
+      // en la carga inicial solo se toman los que vienen archivados: lo archivado antes en el sistema no se deshace
+      if (soloArchivados && !c.archived) continue;
+      void marcarArchivadoDesdeWhatsapp(linea, jidNormalizedUser(c.id), c.archived).catch(() => {});
+    }
+  };
+  s.ev.on("chats.update", (cambios) => alCambiarChats(cambios));
+  s.ev.on("chats.upsert", (chats) => alCambiarChats(chats, true));
+  s.ev.on("messaging-history.set", ({ chats }) => alCambiarChats(chats, true));
 
   s.ev.on("messages.update", (updates) => {
     if (!vigente()) return;

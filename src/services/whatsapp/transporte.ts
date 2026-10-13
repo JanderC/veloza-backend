@@ -68,6 +68,8 @@ export interface Transporte {
   existe(telefono: string): Promise<string | null>;
   /** Descarga el adjunto de un mensaje entrante */
   descargar(msg: WAMessage): Promise<Buffer>;
+  /** Archiva o desarchiva el chat en WhatsApp (queda igual en el teléfono). Necesita el último mensaje del chat. */
+  archivar(jid: string, archivado: boolean, ultimo: { key: WAMessageKey; messageTimestamp: number }): Promise<void>;
 }
 
 const desconectado: Transporte = {
@@ -77,6 +79,7 @@ const desconectado: Transporte = {
     throw new Error("WhatsApp no está conectado");
   },
   presencia: async () => {},
+  archivar: async () => {},
   leer: async () => {},
   existe: async () => {
     throw new Error("WhatsApp no está conectado");

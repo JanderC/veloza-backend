@@ -35,6 +35,7 @@ import { detectarProveedor, listarModelos, PROVEEDORES, probarConexion, type Pro
 import { claveDeChat, esLinea, jidDeTelefono, telefonoDeJid, type Linea } from "../services/whatsapp/transporte";
 import { asegurarChat } from "../services/whatsapp/mensajes";
 import { leerSticker, STICKERS } from "../services/whatsapp/stickers";
+import { archivarEnWhatsapp } from "../services/whatsapp/archivado";
 import { actualizarRespuestaRapida, crearRespuestaRapida, eliminarRespuestaRapida, listarRespuestasRapidas, ordenarRespuestasRapidas } from "../services/whatsapp/respuestasRapidas";
 
 export const whatsappRouter = Router();
@@ -366,7 +367,10 @@ whatsappRouter.put("/chats/:jid", requireAuth, PANEL, async (req, res, next) => 
     if (d.terceroId !== undefined) cambios.tercero_id = d.terceroId;
     const chat = await actualizarChat(jid, cambios);
     if (!chat) return res.status(404).json({ error: "Chat no encontrado" });
-    res.json(await chatParaPanel(chat));
+    // archivar es de la cuenta de WhatsApp: se archiva también en el teléfono de esa línea. Si no se puede (línea
+    // desconectada), queda archivado en el sistema y se avisa con sincronizado = false
+    const sincronizado = d.archivado !== undefined ? await archivarEnWhatsapp(jid, d.archivado) : undefined;
+    res.json({ ...(await chatParaPanel(chat)), ...(sincronizado !== undefined ? { archivadoEnWhatsapp: sincronizado } : {}) });
   } catch (err) {
     next(err);
   }

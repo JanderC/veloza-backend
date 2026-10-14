@@ -45,6 +45,8 @@ interface RegistrarMovimientoCCInput {
   estadoConfirmacion?: "EN_PROCESO" | "CONFIRMADA";
   // Confirmaciones: las transferencias con que se armó (cada una con su fórmula). Sus resultados suman el monto.
   transferencias?: TransferenciaInput[];
+  // lo que suman las transferencias (lo que envió el cliente), antes de la comisión o la tasa
+  totalEnviado?: string;
 }
 
 export interface TransferenciaInput {
@@ -234,9 +236,11 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
     // Las transferencias con que se armó: cada una con su resultado; entre todas tienen que dar el monto
     const transferencias: { id: number; orden: number }[] = [];
     if (input.transferencias?.length) {
-      const suma = input.transferencias.reduce((s, t) => s.plus(aDecimal(t.resultado, "El resultado de una transferencia")), new Decimal(0));
-      if (suma.minus(monto.abs()).abs().gt(new Decimal(0.01).times(input.transferencias.length))) {
-        throw errorHttp(`Las transferencias suman ${suma.toFixed(2)} y el movimiento es de ${monto.abs().toFixed(2)}`, 400);
+      // lo que suman tiene que ser lo enviado (la comisión o la tasa se aplica una vez sobre ese total)
+      const suma = input.transferencias.reduce((s, t) => s.plus(aDecimal(t.cantidad, "La cantidad de una transferencia").abs()), new Decimal(0));
+      const objetivo = input.totalEnviado !== undefined ? aDecimal(input.totalEnviado, "El total enviado").abs() : monto.abs();
+      if (suma.minus(objetivo).abs().gt(new Decimal(0.01).times(input.transferencias.length))) {
+        throw errorHttp(`Las transferencias suman ${suma.toFixed(2)} y el total enviado es ${objetivo.toFixed(2)}`, 400);
       }
       for (const [i, t] of input.transferencias.entries()) {
         const r = await client.query(

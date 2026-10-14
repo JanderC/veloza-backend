@@ -444,6 +444,7 @@ const movimientoSchema = z.object({
     )
     .max(50)
     .optional(),
+  totalEnviado: z.string().optional(),
   transaccionId: z.number().int().optional(),
   fecha: z.string().optional(),
   categoriaId: z.number().int().optional(),

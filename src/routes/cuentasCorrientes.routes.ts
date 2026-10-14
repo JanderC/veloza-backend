@@ -7,6 +7,7 @@ import {
   actualizarCanal,
   anularMovimiento,
   editarMovimientoCuentaCorriente,
+  pagarConfirmacionPorOtroMetodo,
   reactivarMovimientoCuentaCorriente,
   avisarClientePorWhatsApp,
   buscarMovimientoPorNumero,
@@ -423,6 +424,18 @@ cuentasCorrientesRouter.put("/movimientos/:id", requireAuth, requireRole("ADMIN"
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
     res.json(await editarMovimientoCuentaCorriente(id, editarMovimientoSchema.parse(req.body), req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Confirmaciones: pagar al cliente por otro método (no pasa a taquilla) desde una cuenta de la empresa
+cuentasCorrientesRouter.post("/movimientos/:id/pagar-otro-metodo", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    const { cajaId } = z.object({ cajaId: z.number().int().positive() }).parse(req.body);
+    res.json(await pagarConfirmacionPorOtroMetodo(id, cajaId, req.user!.id));
   } catch (err) {
     next(err);
   }

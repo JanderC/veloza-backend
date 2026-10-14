@@ -185,7 +185,10 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
       const saldoCajaNuevo =
         tipoMovimiento === "INGRESO" ? saldoCajaAnterior.plus(montoAbsoluto) : saldoCajaAnterior.minus(montoAbsoluto);
 
-      if (saldoCajaNuevo.isNegative()) {
+      // Una caja física no puede quedar en negativo. Una cuenta de banco de la empresa sí: su saldo real no se carga
+      // en el sistema, y lo que se paga por ahí (una confirmación pagada por Bancolombia, por ejemplo) igual se anota.
+      const tipoCaja = (await client.query(`SELECT tipo FROM cajas WHERE id = $1`, [input.cajaId])).rows[0]?.tipo;
+      if (saldoCajaNuevo.isNegative() && tipoCaja !== "BANCO") {
         throw Object.assign(new Error("Saldo insuficiente en caja para este movimiento"), { status: 409 });
       }
 
@@ -943,6 +946,58 @@ export async function reactivarMovimientoCuentaCorriente(movimientoId: number, u
     throw e;
   } finally {
     client.release();
+  }
+}
+
+/**
+ * Confirmaciones: la confirmación no pasa a taquilla, se le paga al cliente por otro método (transferencia por
+ * Bancolombia, Nequi, bolívares, USDT…). Queda pagada en el momento: se anota el pago en su cuenta y sale de la cuenta
+ * de la empresa elegida. Igual que el pago en taquilla, pero sin taquilla.
+ */
+export async function pagarConfirmacionPorOtroMetodo(movimientoId: number, cajaId: number, usuarioId: number) {
+  const caja = (await pool.query(`SELECT id, nombre FROM cajas WHERE id = $1 AND tipo = 'BANCO' AND activo`, [cajaId])).rows[0];
+  if (!caja) throw errorHttp("Esa cuenta de la empresa no existe o está inactiva", 404);
+  const previa = await pool.query(
+    `SELECT mc.estado_confirmacion, mc.pagado_en FROM movimientos_cuenta_corriente mc JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+     WHERE mc.id = $1 AND cc.modulo = 'CAJA' AND NOT mc.anulado AND mc.reverso_de_id IS NULL AND mc.monto > 0`,
+    [movimientoId]
+  );
+  const p = previa.rows[0];
+  if (!p) throw errorHttp("Confirmación no encontrada", 404);
+  if (p.pagado_en) throw errorHttp("Esa confirmación ya está pagada", 409);
+  if (p.estado_confirmacion === "EN_PROCESO") throw errorHttp("Esa transferencia todavía no está confirmada: primero se confirma y después se paga", 409);
+  // se aparta primero: si dos personas la pagan a la vez, solo una sigue
+  const medio = /bancolombia/i.test(caja.nombre) ? "BANCOLOMBIA" : "OTROS";
+  const apartada = await pool.query(
+    `UPDATE movimientos_cuenta_corriente mc SET pagado_en = now(), pagado_por = $2, pagado_medio = $3, pagado_caja_id = $4
+     FROM cuentas_corrientes cc
+     WHERE mc.id = $1 AND cc.id = mc.cuenta_corriente_id AND mc.pagado_en IS NULL AND NOT mc.anulado
+     RETURNING mc.id, mc.monto, mc.descripcion, cc.tercero_id, cc.canal_id, cc.moneda_id`,
+    [movimientoId, usuarioId, medio, caja.id]
+  );
+  const s = apartada.rows[0];
+  if (!s) throw errorHttp("Esa confirmación ya está pagada", 409);
+  try {
+    const referencia = String(s.descripcion ?? "").split(" · ")[1];
+    const pago = await registrarMovimientoCuentaCorriente({
+      terceroId: s.tercero_id,
+      canalId: s.canal_id,
+      monedaId: s.moneda_id,
+      tipo: "ABONO",
+      monto: new Decimal(s.monto).negated().toFixed(4),
+      descripcion: `Pago por ${caja.nombre}${referencia ? ` · ${referencia}` : ""}`,
+      usuarioId,
+      // sale de la cuenta de la empresa, en la moneda de la cuenta del cliente
+      cajaId: caja.id,
+      montoCaja: new Decimal(s.monto).negated().toFixed(4),
+      monedaCajaId: s.moneda_id,
+    });
+    await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_movimiento_id = $1 WHERE id = $2`, [pago.movimiento.id, movimientoId]);
+    return { pagado: true, cuenta: caja.nombre, pagoId: pago.movimiento.id as number };
+  } catch (err) {
+    // no se pudo anotar el pago: la confirmación vuelve a quedar por pagar
+    await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_en = NULL, pagado_por = NULL, pagado_medio = NULL, pagado_caja_id = NULL WHERE id = $1`, [movimientoId]);
+    throw err;
   }
 }
 

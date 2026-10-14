@@ -136,6 +136,23 @@ export async function obtenerTaquilla() {
     abierta ? [caja.id, abiertaEn] : [caja.id]
   );
 
+  // Lo que entró o salió de esta caja desde otros módulos (un cliente de Cuentas por Cobrar que paga en efectivo, un
+  // movimiento de Cuentas Corrientes con caja): suma o resta en la caja pero no es una operación de ventanilla, así que
+  // se lista aparte para que la cajera vea de dónde salió. Los pagos de confirmaciones ya están en su propia lista.
+  const deOtrosModulos = await pool.query(
+    `SELECT k.id, k.tipo, k.monto, k.created_at, m.codigo, mc.descripcion, t.nombre AS cliente, u.nombre AS usuario_nombre
+     FROM movimientos_caja k
+     JOIN monedas m ON m.id = k.moneda_id
+     JOIN movimientos_cuenta_corriente mc ON mc.movimiento_caja_id = k.id
+     JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+     JOIN terceros t ON t.id = cc.tercero_id
+     JOIN usuarios u ON u.id = k.usuario_id
+     WHERE k.caja_id = $1 AND mc.pagado_movimiento_id IS NULL AND NOT EXISTS (SELECT 1 FROM movimientos_cuenta_corriente x WHERE x.pagado_movimiento_id = mc.id)
+       AND ${abierta ? "k.created_at >= $2" : `(k.created_at AT TIME ZONE '${ZONA}')::date = (now() AT TIME ZONE '${ZONA}')::date`}
+     ORDER BY k.id DESC`,
+    abierta ? [caja.id, abiertaEn] : [caja.id]
+  );
+
   // Pagos hechos por Bancolombia en el mismo período: cuántos y cuánto. No tocan la caja.
   // Lo mismo los pagados por otros métodos.
   const resumenDe = (medio: string) => {
@@ -155,6 +172,7 @@ export async function obtenerTaquilla() {
       saldos: monedas.map((m) => ({ codigo: m.codigo, monto: new Decimal(saldosFuerte.rows.find((s) => s.moneda_id === m.id)?.monto ?? 0).toFixed(4) })),
     },
     operaciones: operaciones.rows,
+    deOtrosModulos: deOtrosModulos.rows,
     pagosBancolombia: resumenDe("BANCOLOMBIA"),
     pagosOtros: resumenDe("OTROS"),
     caja: { ...caja, saldos: porMoneda },

@@ -17,6 +17,7 @@ import { cuentasTerceroRouter } from "./cuentasTercero.routes";
 import { documentosTerceroRouter } from "./documentosTercero.routes";
 import { taquillaRouter } from "./taquilla.routes";
 import { cajaFuerteRouter } from "./cajaFuerte.routes";
+import { capitalRouter } from "./capital.routes";
 
 export const router = Router();
 
@@ -40,3 +41,4 @@ router.use("/taquilla", taquillaRouter);
 router.use("/taquilla-2", taquillaRouter);
 router.use("/taquilla-3", taquillaRouter);
 router.use("/caja-fuerte", cajaFuerteRouter);
+router.use("/capital", capitalRouter);

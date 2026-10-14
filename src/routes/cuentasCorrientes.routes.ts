@@ -7,6 +7,8 @@ import {
   actualizarCanal,
   anularMovimiento,
   editarMovimientoCuentaCorriente,
+  guardarComprobanteTransferencia,
+  urlComprobanteTransferencia,
   pagarConfirmacionPorOtroMetodo,
   reactivarMovimientoCuentaCorriente,
   avisarClientePorWhatsApp,
@@ -258,6 +260,34 @@ cuentasCorrientesRouter.post(
   }
 );
 
+// La captura de cada transferencia de una confirmación armada con varias
+cuentasCorrientesRouter.post(
+  "/transferencias/:id/comprobante",
+  requireAuth,
+  requireRole("ADMIN", "ASESOR", "CAJERO"),
+  upload.single("imagen"),
+  async (req, res, next) => {
+    try {
+      const id = entero(req.params.id);
+      if (id === undefined) return res.status(400).json({ error: "id inválido" });
+      if (!req.file) return res.status(400).json({ error: "Adjuntá la imagen del comprobante" });
+      if (!/^image\/(jpeg|png|webp|gif)$/.test(req.file.mimetype)) return res.status(400).json({ error: "El comprobante tiene que ser una imagen (JPG, PNG o WebP)" });
+      res.status(201).json(await guardarComprobanteTransferencia(id, req.file.buffer, req.file.mimetype));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+cuentasCorrientesRouter.get("/transferencias/:id/comprobante", requireAuth, async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    res.json(await urlComprobanteTransferencia(id));
+  } catch (err) {
+    next(err);
+  }
+});
+
 cuentasCorrientesRouter.get("/movimientos/:id/comprobante", requireAuth, async (req, res, next) => {
   try {
     const id = entero(req.params.id);
@@ -400,6 +430,20 @@ const movimientoSchema = z.object({
   canalMovimientoId: z.number().int().optional(),
   estadoConfirmacion: z.enum(["EN_PROCESO", "CONFIRMADA"]).optional(),
   cuentaDestino: z.string().max(120).optional(),
+  // Confirmaciones: las transferencias con que se armó el movimiento
+  transferencias: z
+    .array(
+      z.object({
+        referencia: z.string().max(120).optional(),
+        remitente: z.string().max(120).optional(),
+        cantidad: z.string(),
+        formula: z.enum(["TASA", "DIVIDIR", "COMISION", "DIRECTO"]),
+        valor: z.string().optional(),
+        resultado: z.string(),
+      })
+    )
+    .max(50)
+    .optional(),
   transaccionId: z.number().int().optional(),
   fecha: z.string().optional(),
   categoriaId: z.number().int().optional(),

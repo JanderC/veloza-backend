@@ -43,6 +43,17 @@ interface RegistrarMovimientoCCInput {
   canalMovimientoId?: number;
   // Confirmación de la transferencia: entra ya confirmada, o pendiente hasta que se verifique (ej. Western Union)
   estadoConfirmacion?: "EN_PROCESO" | "CONFIRMADA";
+  // Confirmaciones: las transferencias con que se armó (cada una con su fórmula). Sus resultados suman el monto.
+  transferencias?: TransferenciaInput[];
+}
+
+export interface TransferenciaInput {
+  referencia?: string;
+  remitente?: string;
+  cantidad: string;
+  formula: "TASA" | "DIVIDIR" | "COMISION" | "DIRECTO";
+  valor?: string;
+  resultado: string;
 }
 
 function errorHttp(mensaje: string, status: number) {
@@ -220,8 +231,33 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
       await client.query(`UPDATE movimientos_cuenta_corriente SET anulado = true WHERE id = $1`, [input.reversoDeId]);
     }
 
+    // Las transferencias con que se armó: cada una con su resultado; entre todas tienen que dar el monto
+    const transferencias: { id: number; orden: number }[] = [];
+    if (input.transferencias?.length) {
+      const suma = input.transferencias.reduce((s, t) => s.plus(aDecimal(t.resultado, "El resultado de una transferencia")), new Decimal(0));
+      if (suma.minus(monto.abs()).abs().gt(new Decimal(0.01).times(input.transferencias.length))) {
+        throw errorHttp(`Las transferencias suman ${suma.toFixed(2)} y el movimiento es de ${monto.abs().toFixed(2)}`, 400);
+      }
+      for (const [i, t] of input.transferencias.entries()) {
+        const r = await client.query(
+          `INSERT INTO movimiento_transferencias (movimiento_id, orden, referencia, remitente, cantidad, formula, valor, resultado) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, orden`,
+          [
+            movResult.rows[0].id,
+            i + 1,
+            t.referencia?.trim() || null,
+            t.remitente?.trim() || null,
+            aDecimal(t.cantidad, "La cantidad de una transferencia").abs().toFixed(8),
+            t.formula,
+            t.valor ? aDecimal(t.valor, "La tasa de una transferencia").abs().toFixed(8) : null,
+            aDecimal(t.resultado, "El resultado de una transferencia").abs().toFixed(4),
+          ]
+        );
+        transferencias.push(r.rows[0]);
+      }
+    }
+
     await client.query("COMMIT");
-    return { movimiento: movResult.rows[0], saldoNuevo: saldoNuevo.toFixed(4), movimientoCaja };
+    return { movimiento: movResult.rows[0], saldoNuevo: saldoNuevo.toFixed(4), movimientoCaja, transferencias };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -607,10 +643,15 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
        FROM movimientos_cuenta_corriente mc WHERE mc.cuenta_corriente_id = $1
      )
      SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.comision_descontada, c.comision_incluida, c.estado_confirmacion, (c.comprobante_key IS NOT NULL) AS tiene_comprobante, c.pagado_en, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
-            c.movimiento_caja_id, c.created_at, c.editado_en, ue.nombre AS editado_por_nombre, u.nombre AS usuario_nombre, mb.codigo AS moneda_base_codigo, cat.nombre AS categoria_nombre
+            c.movimiento_caja_id, c.created_at, c.editado_en, ue.nombre AS editado_por_nombre, u.nombre AS usuario_nombre,
+            (SELECT json_agg(json_build_object('id', t.id, 'orden', t.orden, 'referencia', t.referencia, 'remitente', t.remitente, 'cantidad', t.cantidad, 'formula', t.formula,
+                                               'valor', t.valor, 'resultado', t.resultado, 'tiene_comprobante', t.comprobante_key IS NOT NULL) ORDER BY t.orden)
+             FROM movimiento_transferencias t WHERE t.movimiento_id = c.id) AS transferencias,
+            c.pagado_medio, cp.nombre AS pagado_caja_nombre, cp.tipo AS pagado_caja_tipo, mb.codigo AS moneda_base_codigo, cat.nombre AS categoria_nombre
      FROM corridos c
      JOIN usuarios u ON u.id = c.usuario_id
      LEFT JOIN usuarios ue ON ue.id = c.editado_por
+     LEFT JOIN cajas cp ON cp.id = c.pagado_caja_id
      LEFT JOIN monedas mb ON mb.id = c.moneda_base_id
      LEFT JOIN categorias_movimiento cat ON cat.id = c.categoria_id
      WHERE ($2::date IS NULL OR ${dia.replace("fecha", "c.fecha")} >= $2::date)
@@ -818,6 +859,21 @@ export async function guardarComprobanteMovimiento(movimientoId: number, imagen:
   const key = await subirArchivo("comprobantes-movimientos", `mov-${movimientoId}-${Date.now()}`, imagen, mime);
   await pool.query(`UPDATE movimientos_cuenta_corriente SET comprobante_key = $1, comprobante_mime = $2 WHERE id = $3`, [key, mime, movimientoId]);
   return { ok: true };
+}
+
+/** La captura de una de las transferencias con que se armó una confirmación. */
+export async function guardarComprobanteTransferencia(transferenciaId: number, imagen: Buffer, mime: string) {
+  const existe = await pool.query(`SELECT id, movimiento_id FROM movimiento_transferencias WHERE id = $1`, [transferenciaId]);
+  if (!existe.rows[0]) throw errorHttp("Transferencia no encontrada", 404);
+  const key = await subirArchivo("comprobantes-movimientos", `mov-${existe.rows[0].movimiento_id}-tr-${transferenciaId}-${Date.now()}`, imagen, mime);
+  await pool.query(`UPDATE movimiento_transferencias SET comprobante_key = $1, comprobante_mime = $2 WHERE id = $3`, [key, mime, transferenciaId]);
+  return { ok: true };
+}
+
+export async function urlComprobanteTransferencia(transferenciaId: number) {
+  const r = await pool.query(`SELECT comprobante_key, comprobante_mime FROM movimiento_transferencias WHERE id = $1`, [transferenciaId]);
+  if (!r.rows[0]?.comprobante_key) throw errorHttp("Esa transferencia no tiene captura", 404);
+  return { url: generarUrlTemporal(r.rows[0].comprobante_key, r.rows[0].comprobante_mime, 600) };
 }
 
 /** Enlace temporal (unos minutos) para ver la imagen del comprobante de un movimiento. */

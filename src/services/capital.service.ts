@@ -24,7 +24,18 @@ export async function obtenerDatosDelSistema() {
     c.saldos.push({ codigo: r.codigo, monto: r.monto });
     porCaja.set(r.id, c);
   }
-  return { cajas: [...porCaja.values()], confirmacionesPorPagar: porPagar.rows as { codigo: string; total: string; cantidad: number }[] };
+  // las cuentas de banco de la empresa (Bancolombia, Nequi, Bolívares, USDT…), con su moneda y lo que tienen
+  const bancos = await pool.query(
+    `SELECT c.id, c.nombre, mc.codigo AS moneda,
+            COALESCE((SELECT json_agg(json_build_object('codigo', m.codigo, 'monto', s.monto) ORDER BY m.codigo) FROM saldos_caja s JOIN monedas m ON m.id = s.moneda_id WHERE s.caja_id = c.id AND s.monto <> 0), '[]') AS saldos
+     FROM cajas c LEFT JOIN monedas mc ON mc.id = c.moneda_id
+     WHERE c.activo AND c.tipo = 'BANCO' ORDER BY c.id`
+  );
+  return {
+    cajas: [...porCaja.values()],
+    bancos: bancos.rows as { id: number; nombre: string; moneda: string | null; saldos: { codigo: string; monto: string }[] }[],
+    confirmacionesPorPagar: porPagar.rows as { codigo: string; total: string; cantidad: number }[],
+  };
 }
 
 export async function guardarCuadre(input: { datos: unknown; capitalCop: number; capitalDivisa: number; capitalDivisaCop: number; nota?: string }, usuarioId: number) {
@@ -53,4 +64,52 @@ export async function obtenerCuadre(id: number) {
   );
   if (!r.rows[0]) throw Object.assign(new Error("Ese cuadre no existe"), { status: 404 });
   return r.rows[0];
+}
+
+/** Nueva cuenta de banco de la empresa, desde el capital (con su moneda). */
+export async function crearCuentaBanco(nombre: string, monedaCodigo: string) {
+  const moneda = (await pool.query(`SELECT id FROM monedas WHERE codigo = $1`, [monedaCodigo])).rows[0];
+  if (!moneda) throw Object.assign(new Error("Esa moneda no existe"), { status: 400 });
+  const ya = await pool.query(`SELECT id FROM cajas WHERE lower(nombre) = lower($1)`, [nombre.trim()]);
+  if (ya.rows[0]) throw Object.assign(new Error(`Ya hay una caja o cuenta llamada "${nombre.trim()}"`), { status: 409 });
+  const r = await pool.query(`INSERT INTO cajas (nombre, tipo, descripcion, moneda_id) VALUES ($1, 'BANCO', 'Cuenta de banco cargada desde Capital de giros', $2) RETURNING id, nombre`, [
+    nombre.trim(),
+    moneda.id,
+  ]);
+  return r.rows[0];
+}
+
+/**
+ * El saldo real de una cuenta de banco: se anota la diferencia con lo que tenía el sistema como un movimiento de
+ * esa cuenta (ingreso o egreso), y desde ahí el sistema la sigue llevando (los pagos por otro método salen de ahí).
+ */
+export async function cargarSaldoBanco(cajaId: number, monedaCodigo: string, saldoReal: string, usuarioId: number) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const caja = (await client.query(`SELECT id, nombre FROM cajas WHERE id = $1 AND tipo = 'BANCO' AND activo`, [cajaId])).rows[0];
+    if (!caja) throw Object.assign(new Error("Esa cuenta de banco no existe"), { status: 404 });
+    const moneda = (await client.query(`SELECT id FROM monedas WHERE codigo = $1`, [monedaCodigo])).rows[0];
+    if (!moneda) throw Object.assign(new Error("Esa moneda no existe"), { status: 400 });
+    const real = Number(saldoReal);
+    if (!Number.isFinite(real)) throw Object.assign(new Error("El saldo no es un número válido"), { status: 400 });
+    let fila = (await client.query(`SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`, [cajaId, moneda.id])).rows[0];
+    if (!fila) fila = (await client.query(`INSERT INTO saldos_caja (caja_id, moneda_id, monto) VALUES ($1, $2, 0) RETURNING id, monto`, [cajaId, moneda.id])).rows[0];
+    const antes = Number(fila.monto);
+    const diferencia = Math.round((real - antes) * 10000) / 10000;
+    if (diferencia !== 0) {
+      await client.query(
+        `INSERT INTO movimientos_caja (caja_id, moneda_id, tipo, monto, saldo_anterior, saldo_nuevo, usuario_id, observacion) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [cajaId, moneda.id, diferencia > 0 ? "INGRESO" : "EGRESO", Math.abs(diferencia).toFixed(4), antes.toFixed(4), real.toFixed(4), usuarioId, "Saldo real cargado desde Capital de giros"]
+      );
+      await client.query(`UPDATE saldos_caja SET monto = $1 WHERE id = $2`, [real.toFixed(4), fila.id]);
+    }
+    await client.query("COMMIT");
+    return { cuenta: caja.nombre, antes: antes.toFixed(4), ahora: real.toFixed(4), diferencia: diferencia.toFixed(4) };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
 }

@@ -7,6 +7,7 @@ import {
   actualizarCanal,
   anularMovimiento,
   editarMovimientoCuentaCorriente,
+  moverMovimientoCuentaCorriente,
   guardarComprobanteTransferencia,
   urlComprobanteTransferencia,
   pagarConfirmacionPorOtroMetodo,
@@ -469,6 +470,18 @@ cuentasCorrientesRouter.put("/movimientos/:id", requireAuth, requireRole("ADMIN"
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
     res.json(await editarMovimientoCuentaCorriente(id, editarMovimientoSchema.parse(req.body), req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Pasar un movimiento cargado en el cliente equivocado a la cuenta que era (solo administradores)
+cuentasCorrientesRouter.post("/movimientos/:id/mover", requireAuth, requireRole("ADMIN"), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    const { cuentaId } = z.object({ cuentaId: z.number().int().positive() }).parse(req.body);
+    res.json(await moverMovimientoCuentaCorriente(id, cuentaId, req.user!.id));
   } catch (err) {
     next(err);
   }

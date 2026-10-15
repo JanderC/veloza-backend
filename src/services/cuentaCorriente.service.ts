@@ -975,6 +975,73 @@ export async function editarMovimientoCuentaCorriente(
 }
 
 /**
+ * Pasar un movimiento cargado en el cliente equivocado a la cuenta que era (solo administradores). El movimiento es
+ * el mismo (con su fecha, referencia y transferencias): sale del saldo de una cuenta y entra en el de la otra, y el
+ * saldo corrido de las dos se corre. Solo entre cuentas del mismo módulo y la misma moneda.
+ */
+export async function moverMovimientoCuentaCorriente(movimientoId: number, cuentaDestinoId: number, usuarioId: number) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const previo = await client.query(`SELECT cuenta_corriente_id FROM movimientos_cuenta_corriente WHERE id = $1`, [movimientoId]);
+    if (!previo.rows[0]) throw errorHttp("Movimiento no encontrado", 404);
+    const origenId = previo.rows[0].cuenta_corriente_id as number;
+    if (origenId === cuentaDestinoId) throw errorHttp("El movimiento ya está en esa cuenta", 400);
+    // las dos cuentas, siempre en el mismo orden (como al registrar)
+    const cuentas = (
+      await client.query(
+        `SELECT cc.id, cc.modulo, cc.moneda_id, cc.saldo_actual, t.nombre FROM cuentas_corrientes cc JOIN terceros t ON t.id = cc.tercero_id
+         WHERE cc.id = ANY($1::int[]) ORDER BY cc.id FOR UPDATE OF cc`,
+        [[origenId, cuentaDestinoId]]
+      )
+    ).rows;
+    const origen = cuentas.find((c) => c.id === origenId);
+    const destino = cuentas.find((c) => c.id === cuentaDestinoId);
+    if (!origen || !destino) throw errorHttp("Esa cuenta no existe", 404);
+    if (origen.modulo !== destino.modulo) throw errorHttp("Solo se mueve entre cuentas del mismo módulo", 400);
+    if (origen.moneda_id !== destino.moneda_id) throw errorHttp("Esa cuenta lleva otra moneda: el movimiento no se puede pasar ahí", 400);
+    const m = (await client.query(`SELECT * FROM movimientos_cuenta_corriente WHERE id = $1 FOR UPDATE`, [movimientoId])).rows[0];
+    if (m.anulado || m.reverso_de_id) throw errorHttp("Un movimiento anulado (o su reverso) no se mueve", 409);
+    if (m.pagado_en) throw errorHttp("Este movimiento ya se pagó: no se mueve", 409);
+    const esPago = await client.query(`SELECT 1 FROM movimientos_cuenta_corriente WHERE pagado_movimiento_id = $1 LIMIT 1`, [movimientoId]);
+    if (esPago.rows[0]) throw errorHttp("Este movimiento es el pago de otro: no se mueve", 409);
+    const monto = m.monto as string;
+
+    // en la cuenta de donde sale, lo cargado después deja de contarlo
+    await client.query(`UPDATE movimientos_cuenta_corriente SET saldo_anterior = saldo_anterior - $1, saldo_nuevo = saldo_nuevo - $1 WHERE cuenta_corriente_id = $2 AND id > $3`, [
+      monto,
+      origenId,
+      movimientoId,
+    ]);
+    await client.query(`UPDATE cuentas_corrientes SET saldo_actual = saldo_actual - $1 WHERE id = $2`, [monto, origenId]);
+
+    // en la cuenta donde entra, se ubica por orden de carga: su saldo anterior es el de lo cargado justo antes
+    const antes = (await client.query(`SELECT saldo_nuevo FROM movimientos_cuenta_corriente WHERE cuenta_corriente_id = $1 AND id < $2 ORDER BY id DESC LIMIT 1`, [cuentaDestinoId, movimientoId])).rows[0];
+    const despues = antes
+      ? null
+      : (await client.query(`SELECT saldo_anterior FROM movimientos_cuenta_corriente WHERE cuenta_corriente_id = $1 AND id > $2 ORDER BY id LIMIT 1`, [cuentaDestinoId, movimientoId])).rows[0];
+    const base = new Decimal(antes ? antes.saldo_nuevo : despues ? despues.saldo_anterior : destino.saldo_actual);
+    await client.query(`UPDATE movimientos_cuenta_corriente SET saldo_anterior = saldo_anterior + $1, saldo_nuevo = saldo_nuevo + $1 WHERE cuenta_corriente_id = $2 AND id > $3`, [
+      monto,
+      cuentaDestinoId,
+      movimientoId,
+    ]);
+    await client.query(
+      `UPDATE movimientos_cuenta_corriente SET cuenta_corriente_id = $2, saldo_anterior = $3, saldo_nuevo = $4, editado_en = now(), editado_por = $5 WHERE id = $1`,
+      [movimientoId, cuentaDestinoId, base.toFixed(4), base.plus(monto).toFixed(4), usuarioId]
+    );
+    await client.query(`UPDATE cuentas_corrientes SET saldo_actual = saldo_actual + $1 WHERE id = $2`, [monto, cuentaDestinoId]);
+    await client.query("COMMIT");
+    return { id: movimientoId, de: origen.nombre as string, a: destino.nombre as string };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * Volver a activar un movimiento anulado (solo administradores): se quita el movimiento contrario que dejó la
  * anulación, el original deja de estar anulado y el saldo vuelve a contarlo. Después se puede editar como cualquiera.
  * Si la anulación también devolvió plata a una caja, no se reactiva acá: se carga de nuevo.

@@ -7,6 +7,7 @@ import {
   actualizarCanal,
   anularMovimiento,
   editarMovimientoCuentaCorriente,
+  buscarClientesExistentes,
   moverMovimientoCuentaCorriente,
   guardarComprobanteTransferencia,
   urlComprobanteTransferencia,
@@ -113,6 +114,16 @@ cuentasCorrientesRouter.get("/", requireAuth, async (req, res, next) => {
         vista: req.query.vista === "corrientes" || req.query.vista === "cobrar" || req.query.vista === "cajas" ? req.query.vista : undefined,
       })
     );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ¿Ya existe este cliente? (mismo nombre o mismo teléfono, en cualquier módulo) — al crear uno nuevo
+cuentasCorrientesRouter.get("/clientes-existentes", requireAuth, async (req, res, next) => {
+  try {
+    const q = z.object({ nombre: z.string().max(120).optional(), telefono: z.string().max(40).optional() }).parse(req.query);
+    res.json(await buscarClientesExistentes(q.nombre ?? "", q.telefono ?? ""));
   } catch (err) {
     next(err);
   }
@@ -416,6 +427,8 @@ cuentasCorrientesRouter.post(
 // ---------- Registrar movimiento ----------
 
 const movimientoSchema = z.object({
+  cuentaId: z.number().int().positive().optional(),
+  modulo: z.enum(["CORRIENTE", "POR_COBRAR", "CAJA"]).optional(),
   terceroId: z.number().int(),
   canalId: z.number().int(),
   monedaId: z.number().int(),

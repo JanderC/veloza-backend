@@ -461,7 +461,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
     `UPDATE movimientos_cuenta_corriente mc SET pagado_en = now(), pagado_por = $2, pagado_medio = $3, pagado_caja_id = $4
      FROM cuentas_corrientes cc
      WHERE mc.id = $1 AND cc.id = mc.cuenta_corriente_id AND mc.pagado_en IS NULL AND NOT mc.anulado
-     RETURNING mc.id, mc.monto, mc.descripcion, cc.tercero_id, cc.canal_id, cc.moneda_id`,
+     RETURNING mc.id, mc.monto, mc.descripcion, cc.id AS cuenta_id, cc.tercero_id, cc.canal_id, cc.moneda_id`,
     [movimientoId, usuarioId, medio, caja.id]
   );
   const s = apartada.rows[0];
@@ -470,6 +470,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
   try {
     const referencia = String(s.descripcion ?? "").split(" · ")[1];
     const pago = await registrarMovimientoCuentaCorriente({
+      cuentaId: s.cuenta_id,
       terceroId: s.tercero_id,
       canalId: s.canal_id,
       monedaId: s.moneda_id,

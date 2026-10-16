@@ -9,6 +9,10 @@ import { claveDeChat, jidDeTelefono, type Linea } from "./whatsapp/transporte";
 import { generarUrlTemporal, subirArchivo } from "./almacenamiento.service";
 
 interface RegistrarMovimientoCCInput {
+  // La cuenta exacta: el mismo cliente puede tener cuenta en varios módulos con el mismo medio y moneda. Si no se
+  // manda, se busca por tercero + medio + moneda (y el módulo, si viene).
+  cuentaId?: number;
+  modulo?: "CORRIENTE" | "POR_COBRAR" | "CAJA";
   terceroId: number;
   canalId: number;
   monedaId: number; // moneda del saldo de la cuenta corriente (COP o USD, según la fase del Excel)
@@ -58,6 +62,10 @@ export interface TransferenciaInput {
   resultado: string;
 }
 
+// El nombre para comparar: sin mayúsculas, tildes ni espacios de más ("Raúl  Sánchez" = "raul sanchez")
+const normalizarSql = (expr: string) => `regexp_replace(translate(lower(trim(${expr})), 'áéíóúüñ', 'aeiouun'), '\\s+', ' ', 'g')`;
+const NOMBRE_NORMALIZADO = normalizarSql("nombre");
+
 function errorHttp(mensaje: string, status: number) {
   return Object.assign(new Error(mensaje), { status });
 }
@@ -102,19 +110,24 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
     if (monto.isZero()) throw errorHttp("El monto no puede ser cero", 400);
 
     // ---------- 1) Cuenta corriente (get-or-create + lock) ----------
-    let cuentaResult = await client.query(
-      `SELECT * FROM cuentas_corrientes
-       WHERE tercero_id = $1 AND canal_id = $2 AND moneda_id = $3
-       FOR UPDATE`,
-      [input.terceroId, input.canalId, input.monedaId]
-    );
+    const cuentaResult = input.cuentaId
+      ? await client.query(`SELECT * FROM cuentas_corrientes WHERE id = $1 FOR UPDATE`, [input.cuentaId])
+      : await client.query(
+          `SELECT * FROM cuentas_corrientes
+           WHERE tercero_id = $1 AND canal_id = $2 AND moneda_id = $3 AND ($4::text IS NULL OR modulo = $4)
+           FOR UPDATE`,
+          [input.terceroId, input.canalId, input.monedaId, input.modulo ?? null]
+        );
+    if (input.cuentaId && !cuentaResult.rows[0]) throw errorHttp("Cuenta no encontrada", 404);
+    // el mismo cliente con cuenta en dos módulos (mismo medio y moneda): sin decir cuál, no se adivina
+    if (cuentaResult.rows.length > 1) throw errorHttp("Ese cliente tiene cuenta en varios módulos con ese medio y moneda: recargá la página (F5) y volvé a intentar", 409);
 
     let cuenta;
     if (cuentaResult.rows.length === 0) {
       const insert = await client.query(
-        `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual)
-         VALUES ($1, $2, $3, 0) RETURNING *`,
-        [input.terceroId, input.canalId, input.monedaId]
+        `INSERT INTO cuentas_corrientes (tercero_id, canal_id, moneda_id, saldo_actual, modulo)
+         VALUES ($1, $2, $3, 0, $4) RETURNING *`,
+        [input.terceroId, input.canalId, input.monedaId, input.modulo ?? "CORRIENTE"]
       );
       cuenta = insert.rows[0];
     } else {
@@ -330,18 +343,10 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
   if (!terceroId) {
     const n = input.nuevoTercero;
     if (!n?.nombre.trim()) throw errorHttp("Elegí un tercero o escribí el nombre del nuevo", 400);
-    // Cuentas por Cobrar lleva sus propios clientes, separados de los demás módulos: el nombre solo no se puede
-    // repetir dentro de Cuentas por Cobrar (puede haber un "Manuel" allá y otro en Cuentas Corrientes).
-    const repetido =
-      input.modulo === "POR_COBRAR"
-        ? await pool.query(
-            `SELECT t.id FROM terceros t JOIN cuentas_corrientes cc ON cc.tercero_id = t.id AND cc.modulo = 'POR_COBRAR' AND cc.activo
-             WHERE lower(t.nombre) = lower($1) AND t.activo LIMIT 1`,
-            [n.nombre.trim()]
-          )
-        : await pool.query(`SELECT id FROM terceros WHERE lower(nombre) = lower($1) AND activo`, [n.nombre.trim()]);
-    if (repetido.rows[0] && input.modulo === "CAJA" && input.usarExistente) {
-      // Confirmaciones: es el mismo cliente (ya se preguntó en la pantalla). Se le completan el teléfono y la cédula si faltaban.
+    // El cliente es uno solo para todos los módulos: el mismo nombre no se crea dos veces (ni en otro módulo)
+    const repetido = await pool.query(`SELECT id FROM terceros WHERE ${NOMBRE_NORMALIZADO} = ${normalizarSql("$1")} AND activo ORDER BY id LIMIT 1`, [n.nombre.trim()]);
+    if (repetido.rows[0] && input.usarExistente) {
+      // es el mismo cliente (ya se preguntó en la pantalla). Se le completan el teléfono y la cédula si faltaban.
       terceroId = repetido.rows[0].id as number;
       await pool.query(`UPDATE terceros SET telefono = COALESCE(NULLIF(telefono, ''), $1), identificacion = COALESCE(NULLIF(identificacion, ''), $2) WHERE id = $3`, [
         n.telefono?.trim() || null,
@@ -349,7 +354,7 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
         terceroId,
       ]);
     } else if (repetido.rows[0]) {
-      throw errorHttp(`Ya existe "${n.nombre.trim()}": buscalo en la lista en vez de crearlo de nuevo`, 409);
+      throw errorHttp(`Ya existe "${n.nombre.trim()}" en el sistema: usá ese cliente en vez de crearlo de nuevo`, 409);
     } else {
       const r = await pool.query(`INSERT INTO terceros (nombre, identificacion, telefono, tipo) VALUES ($1, $2, $3, $4) RETURNING id`, [
         n.nombre.trim(),
@@ -361,10 +366,12 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
     }
   }
 
-  const existe = await pool.query(`SELECT id, activo, modulo FROM cuentas_corrientes WHERE tercero_id = $1 AND canal_id = $2 AND moneda_id = $3`, [
+  // la cuenta de este módulo (el mismo cliente puede tener otras en los demás módulos)
+  const existe = await pool.query(`SELECT id, activo, modulo FROM cuentas_corrientes WHERE tercero_id = $1 AND canal_id = $2 AND moneda_id = $3 AND modulo = $4`, [
     terceroId,
     canalId,
     input.monedaId,
+    input.modulo ?? "CORRIENTE",
   ]);
   // Confirmaciones, cliente que ya existía: el cliente es uno solo aunque cambie de medio. Si ya tiene una cuenta de
   // Confirmaciones en esa moneda (con el medio que sea), el movimiento va a esa: el medio lo lleva cada movimiento.
@@ -378,10 +385,7 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
       return obtenerCuentaCorriente(suya.rows[0].id);
     }
   }
-  if (existe.rows[0] && input.modulo === "CAJA" && input.usarExistente) {
-    if (existe.rows[0].modulo !== "CAJA") {
-      throw errorHttp("Ese nombre ya tiene una cuenta con ese medio y esa moneda en otro módulo (Cuentas Corrientes): registralo con otro nombre o desde allá", 409);
-    }
+  if (existe.rows[0] && input.usarExistente) {
     if (!existe.rows[0].activo) await pool.query(`UPDATE cuentas_corrientes SET activo = true WHERE id = $1`, [existe.rows[0].id]);
     return obtenerCuentaCorriente(existe.rows[0].id);
   }
@@ -400,6 +404,7 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
   );
   if (saldoInicial && !saldoInicial.isZero()) {
     await registrarMovimientoCuentaCorriente({
+      cuentaId: cuenta.rows[0].id,
       terceroId,
       canalId,
       monedaId: input.monedaId,
@@ -1099,7 +1104,7 @@ export async function pagarConfirmacionPorOtroMetodo(movimientoId: number, cajaI
     `UPDATE movimientos_cuenta_corriente mc SET pagado_en = now(), pagado_por = $2, pagado_medio = $3, pagado_caja_id = $4
      FROM cuentas_corrientes cc
      WHERE mc.id = $1 AND cc.id = mc.cuenta_corriente_id AND mc.pagado_en IS NULL AND NOT mc.anulado
-     RETURNING mc.id, mc.monto, mc.descripcion, cc.tercero_id, cc.canal_id, cc.moneda_id`,
+     RETURNING mc.id, mc.monto, mc.descripcion, cc.id AS cuenta_id, cc.tercero_id, cc.canal_id, cc.moneda_id`,
     [movimientoId, usuarioId, medio, caja.id]
   );
   const s = apartada.rows[0];
@@ -1107,6 +1112,7 @@ export async function pagarConfirmacionPorOtroMetodo(movimientoId: number, cajaI
   try {
     const referencia = String(s.descripcion ?? "").split(" · ")[1];
     const pago = await registrarMovimientoCuentaCorriente({
+      cuentaId: s.cuenta_id,
       terceroId: s.tercero_id,
       canalId: s.canal_id,
       monedaId: s.moneda_id,
@@ -1143,6 +1149,7 @@ export async function anularMovimiento(movimientoId: number, usuarioId: number) 
   if (m.anulado) throw errorHttp("Ese movimiento ya está anulado", 409);
 
   return registrarMovimientoCuentaCorriente({
+    cuentaId: m.cuenta_corriente_id,
     terceroId: m.tercero_id,
     canalId: m.canal_id,
     monedaId: m.moneda_id,
@@ -1171,3 +1178,26 @@ export async function anularMovimiento(movimientoId: number, usuarioId: number) 
   });
 }
 
+
+/**
+ * ¿Ya existe este cliente? Al crear uno en cualquier módulo: los que tienen el mismo nombre (sin importar mayúsculas
+ * ni tildes) o el mismo teléfono (los últimos 10 dígitos), con los módulos donde ya tienen cuenta. El cliente es uno
+ * solo para todo el sistema: la pantalla ofrece traer ese en vez de crear otro.
+ */
+export async function buscarClientesExistentes(nombre: string, telefono: string) {
+  const nom = nombre.trim();
+  const digitos = telefono.replace(/\D/g, "").slice(-10);
+  if (nom.length < 3 && digitos.length < 7) return [];
+  const r = await pool.query(
+    `SELECT t.id, t.nombre, t.telefono, t.identificacion, t.tipo,
+            (length($1) >= 3 AND ${normalizarSql("t.nombre")} = ${normalizarSql("$1")}) AS mismo_nombre,
+            (length($2) >= 7 AND right(regexp_replace(coalesce(t.telefono, ''), '\\D', '', 'g'), 10) = $2) AS mismo_telefono,
+            COALESCE((SELECT array_agg(DISTINCT cc.modulo) FROM cuentas_corrientes cc WHERE cc.tercero_id = t.id AND cc.activo), '{}') AS modulos
+     FROM terceros t
+     WHERE t.activo AND ((length($1) >= 3 AND ${normalizarSql("t.nombre")} = ${normalizarSql("$1")})
+        OR (length($2) >= 7 AND right(regexp_replace(coalesce(t.telefono, ''), '\\D', '', 'g'), 10) = $2))
+     ORDER BY 6 DESC, t.id LIMIT 5`,
+    [nom, digitos]
+  );
+  return r.rows as { id: number; nombre: string; telefono: string | null; identificacion: string | null; tipo: string; mismo_nombre: boolean; mismo_telefono: boolean; modulos: string[] }[];
+}

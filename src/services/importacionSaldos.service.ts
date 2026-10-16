@@ -113,6 +113,7 @@ export async function importarSaldosIniciales(buffer: Buffer, usuarioId: number)
       const tercero = await obtenerOCrearTercero(nombre, identificacion, tipo);
 
       const resultado = await registrarMovimientoCuentaCorriente({
+        modulo: "CORRIENTE",
         terceroId: tercero.id,
         canalId: canal.id,
         monedaId: moneda.id,

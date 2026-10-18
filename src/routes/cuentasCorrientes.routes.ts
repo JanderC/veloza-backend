@@ -7,6 +7,7 @@ import {
   actualizarCanal,
   anularMovimiento,
   editarMovimientoCuentaCorriente,
+  enviarAConfirmaciones,
   buscarClientesExistentes,
   moverMovimientoCuentaCorriente,
   guardarComprobanteTransferencia,
@@ -114,6 +115,27 @@ cuentasCorrientesRouter.get("/", requireAuth, async (req, res, next) => {
         vista: req.query.vista === "corrientes" || req.query.vista === "cobrar" || req.query.vista === "cajas" ? req.query.vista : undefined,
       })
     );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Pasar a Confirmaciones lo que se le debe en Cuentas Corrientes, con comisión o tasa
+cuentasCorrientesRouter.post("/:id/enviar-a-confirmaciones", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const d = z
+      .object({
+        monto: z.string(),
+        formula: z.enum(["DIRECTO", "COMISION", "TASA", "DIVIDIR"]),
+        valor: z.string().optional(),
+        monedaEntregaId: z.number().int().positive(),
+        canalId: z.number().int().positive(),
+        descripcion: z.string().max(200).optional(),
+      })
+      .parse(req.body);
+    res.status(201).json(await enviarAConfirmaciones(id, d, req.user!.id));
   } catch (err) {
     next(err);
   }

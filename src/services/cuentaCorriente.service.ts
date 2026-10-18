@@ -546,6 +546,12 @@ export async function cambiarGrupoCobro(id: number, grupo: string | null) {
   return obtenerCuentaCorriente(id);
 }
 
+// ¿Este movimiento tiene lo buscado? En la referencia (número de transferencia, quién envió), en la cuenta a la que
+// se pagó o en el desglose de sus transferencias. (Por nombre del cliente ya busca la lista.)
+const COINCIDE_MOVIMIENTO = (a: string, p: string) =>
+  `((position(' · ' in ${a}.descripcion) > 0 AND split_part(${a}.descripcion, ' · ', 2) ILIKE ${p}) OR ${a}.cuenta_destino ILIKE ${p}` +
+  ` OR EXISTS (SELECT 1 FROM movimiento_transferencias tr WHERE tr.movimiento_id = ${a}.id AND (tr.referencia ILIKE ${p} OR tr.remitente ILIKE ${p})))`;
+
 export async function listarCuentasCorrientes(filtros: {
   terceroId?: number;
   canalId?: number;
@@ -579,7 +585,7 @@ export async function listarCuentasCorrientes(filtros: {
     // ...o por referencia: la del cliente, o la anotada en alguno de sus movimientos (número de transferencia, MTCN, quién envió)
     const porReferencia =
       texto.length >= 3
-        ? ` OR cc.referencia ILIKE $${valores.length} OR EXISTS (SELECT 1 FROM movimientos_cuenta_corriente mr WHERE mr.cuenta_corriente_id = cc.id AND NOT mr.anulado AND position(' · ' in mr.descripcion) > 0 AND split_part(mr.descripcion, ' · ', 2) ILIKE $${valores.length})`
+        ? ` OR cc.referencia ILIKE $${valores.length} OR EXISTS (SELECT 1 FROM movimientos_cuenta_corriente mr WHERE mr.cuenta_corriente_id = cc.id AND NOT mr.anulado AND ${COINCIDE_MOVIMIENTO("mr", `$${valores.length}`)})`
         : "";
     const porTexto = `(t.nombre ILIKE $${valores.length} OR t.identificacion ILIKE $${valores.length}${porReferencia})`;
     const digitos = texto.replace(/\D/g, "");
@@ -596,13 +602,15 @@ export async function listarCuentasCorrientes(filtros: {
   let filas = r.rows;
   if (buscado.length >= 3 && filas.length) {
     const m = await pool.query(
-      `SELECT DISTINCT ON (cuenta_corriente_id) cuenta_corriente_id, descripcion, fecha, monto
-       FROM movimientos_cuenta_corriente
-       WHERE NOT anulado AND position(' · ' in descripcion) > 0 AND split_part(descripcion, ' · ', 2) ILIKE $1 AND cuenta_corriente_id = ANY($2::int[])
-       ORDER BY cuenta_corriente_id, id DESC`,
+      `SELECT DISTINCT ON (mv.cuenta_corriente_id) mv.cuenta_corriente_id, mv.id, mv.descripcion, mv.fecha, mv.monto,
+              count(*) OVER (PARTITION BY mv.cuenta_corriente_id) AS cuantos
+       FROM movimientos_cuenta_corriente mv
+       WHERE NOT mv.anulado AND ${COINCIDE_MOVIMIENTO("mv", "$1")} AND mv.cuenta_corriente_id = ANY($2::int[])
+       ORDER BY mv.cuenta_corriente_id, mv.id DESC`,
       [`%${buscado}%`, filas.map((f) => f.id)]
     );
-    const porCuenta = new Map(m.rows.map((x) => [x.cuenta_corriente_id, { descripcion: x.descripcion, fecha: x.fecha, monto: x.monto }]));
+    // el movimiento donde está (el más reciente) y cuántos más coinciden: la pantalla lleva directo a ese día y lo resalta
+    const porCuenta = new Map(m.rows.map((x) => [x.cuenta_corriente_id, { id: x.id, descripcion: x.descripcion, fecha: x.fecha, monto: x.monto, cuantos: Number(x.cuantos) }]));
     filas = filas.map((f) => ({ ...f, movimiento_coincide: porCuenta.get(f.id) ?? null }));
   }
   return conValorMoneda(filas);
@@ -1200,4 +1208,92 @@ export async function buscarClientesExistentes(nombre: string, telefono: string)
     [nom, digitos]
   );
   return r.rows as { id: number; nombre: string; telefono: string | null; identificacion: string | null; tipo: string; mismo_nombre: boolean; mismo_telefono: boolean; modulos: string[] }[];
+}
+
+/**
+ * Pasar a Confirmaciones lo que se le debe a un cliente en Cuentas Corrientes (ej. 5.000 USD que mandó en varias
+ * transferencias): se le cobra una comisión o se convierte con una tasa, y queda como una confirmación por pagarle
+ * (en taquilla o por otro método), en su cuenta de Confirmaciones. En Cuentas Corrientes se anota lo enviado, así
+ * que ahí deja de deberle eso. Si lo segundo falla, la confirmación se anula: no queda a medias.
+ */
+export async function enviarAConfirmaciones(
+  cuentaId: number,
+  d: { monto: string; formula: "DIRECTO" | "COMISION" | "TASA" | "DIVIDIR"; valor?: string; monedaEntregaId: number; canalId: number; descripcion?: string },
+  usuarioId: number
+) {
+  const origen = (
+    await pool.query(
+      `SELECT cc.id, cc.tercero_id, cc.canal_id, cc.moneda_id, cc.modulo, m.codigo, m.decimales FROM cuentas_corrientes cc JOIN monedas m ON m.id = cc.moneda_id WHERE cc.id = $1 AND cc.activo`,
+      [cuentaId]
+    )
+  ).rows[0];
+  if (!origen) throw errorHttp("Cuenta no encontrada", 404);
+  if (origen.modulo !== "CORRIENTE") throw errorHttp("Solo se envía a Confirmaciones desde Cuentas Corrientes", 400);
+  const entrega = (await pool.query(`SELECT id, codigo, decimales FROM monedas WHERE id = $1`, [d.monedaEntregaId])).rows[0];
+  if (!entrega) throw errorHttp("Esa moneda no existe", 400);
+  const canal = (await pool.query(`SELECT id, nombre FROM canales_cuenta_corriente WHERE id = $1`, [d.canalId])).rows[0];
+  if (!canal) throw errorHttp("Elegí el medio de la confirmación", 400);
+  const monto = aDecimal(d.monto, "El monto").abs();
+  if (monto.isZero()) throw errorHttp("El monto no puede ser cero", 400);
+  const valor = d.valor !== undefined && d.valor !== "" ? aDecimal(d.valor, d.formula === "COMISION" ? "La comisión" : "La tasa").abs() : null;
+  const decimales = Number(entrega.decimales);
+  const misma = entrega.id === origen.moneda_id;
+  if ((d.formula === "DIRECTO" || d.formula === "COMISION") && !misma)
+    throw errorHttp(`Para entregar en ${entrega.codigo} hace falta una tasa (× Tasa o ÷ Dividir)`, 400);
+  if (d.formula !== "DIRECTO" && (!valor || valor.isZero())) throw errorHttp(d.formula === "COMISION" ? "Escribí el % de comisión" : "Escribí la tasa", 400);
+  if (d.formula === "COMISION" && valor!.gte(100)) throw errorHttp("La comisión tiene que ser menor al 100%", 400);
+
+  // lo que queda para el cliente, en la moneda en que se le entrega
+  const factor = d.formula === "COMISION" ? new Decimal(1).minus(valor!.div(100)) : null;
+  const resultado = (
+    d.formula === "TASA" ? monto.times(valor!) : d.formula === "DIVIDIR" ? monto.div(valor!) : d.formula === "COMISION" ? monto.times(factor!) : monto
+  ).toDecimalPlaces(decimales, Decimal.ROUND_HALF_UP);
+  if (resultado.isZero()) throw errorHttp("Lo que se le entrega da cero: revisá el monto y la tasa", 400);
+  const fmt = (v: Decimal) => v.toNumber().toLocaleString("es-CO", { maximumFractionDigits: 4 });
+  const detalle =
+    d.formula === "COMISION"
+      ? `${fmt(monto)} ${origen.codigo} − ${fmt(valor!)}%`
+      : d.formula === "TASA"
+        ? `${fmt(monto)} ${origen.codigo} × ${fmt(valor!)}`
+        : d.formula === "DIVIDIR"
+          ? `${fmt(monto)} ${origen.codigo} ÷ ${fmt(valor!)}`
+          : `${fmt(monto)} ${origen.codigo}`;
+  const titulo = d.descripcion?.trim() || "Desde Cuentas Corrientes";
+
+  // su cuenta de Confirmaciones en esa moneda (el cliente es uno solo: se usa la que tenga, o se le abre)
+  const destino = await crearCuentaCorriente({ terceroId: origen.tercero_id, canalId: canal.id, modulo: "CAJA", monedaId: entrega.id, usarExistente: true, usuarioId });
+  const confirmacion = await registrarMovimientoCuentaCorriente({
+    cuentaId: destino.id,
+    terceroId: origen.tercero_id,
+    canalId: destino.canal_id,
+    monedaId: entrega.id,
+    canalMovimientoId: canal.id,
+    tipo: "CARGO",
+    descripcion: `${titulo} (${detalle})`,
+    monedaBaseId: origen.moneda_id,
+    estadoConfirmacion: "CONFIRMADA",
+    usuarioId,
+    ...(d.formula === "TASA"
+      ? { cantidadBase: monto.toString(), tasa: valor!.toString() }
+      : d.formula === "COMISION"
+        ? { cantidadBase: monto.toString(), tasa: factor!.toString(), tasaEsPorcentaje: true, comisionDescontada: true, comisionIncluida: false }
+        : { monto: resultado.toFixed(decimales) }),
+  } as RegistrarMovimientoCCInput);
+  try {
+    // en Cuentas Corrientes: lo enviado sale de lo que se le debe
+    const corriente = await registrarMovimientoCuentaCorriente({
+      cuentaId: origen.id,
+      terceroId: origen.tercero_id,
+      canalId: origen.canal_id,
+      monedaId: origen.moneda_id,
+      tipo: "CARGO",
+      monto: monto.toFixed(4),
+      descripcion: `Enviado a Confirmaciones: ${fmt(resultado)} ${entrega.codigo} (${detalle})`,
+      usuarioId,
+    });
+    return { confirmacionId: confirmacion.movimiento.id as number, corrienteId: corriente.movimiento.id as number, cuentaConfirmacionesId: destino.id as number, resultado: resultado.toFixed(decimales), moneda: entrega.codigo as string };
+  } catch (e) {
+    await anularMovimiento(confirmacion.movimiento.id, usuarioId).catch(() => {});
+    throw e;
+  }
 }

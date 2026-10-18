@@ -6,6 +6,7 @@ import {
   obtenerMovimientosCuentaCorriente,
   obtenerEstadoCuentaTercero,
   obtenerCuadresCaja,
+  obtenerRendimiento,
 } from "../services/reportes.service";
 
 export const reportesRouter = Router();
@@ -70,6 +71,15 @@ reportesRouter.get("/cuadres-caja", requireAuth, requireRole("ADMIN", "ASESOR"),
       estado: typeof estado === "string" ? estado : undefined,
     });
     res.json(data);
+  } catch (err) {
+    next(err);
+  }
+});
+// Rendimiento del día por empleado: el administrador ve a todos, cada empleado solo lo suyo
+reportesRouter.get("/rendimiento", requireAuth, async (req, res, next) => {
+  try {
+    const dia = typeof req.query.dia === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.dia) ? req.query.dia : new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
+    res.json(await obtenerRendimiento(dia, req.user!.rol === "ADMIN" ? null : req.user!.id));
   } catch (err) {
     next(err);
   }

@@ -113,3 +113,88 @@ export async function cargarSaldoBanco(cajaId: number, monedaCodigo: string, sal
     client.release();
   }
 }
+
+/** Cambiarle el nombre a una cuenta de banco de la empresa. */
+export async function renombrarCuentaBanco(cajaId: number, nombre: string) {
+  const ya = await pool.query(`SELECT id FROM cajas WHERE lower(nombre) = lower($1) AND id <> $2`, [nombre.trim(), cajaId]);
+  if (ya.rows[0]) throw Object.assign(new Error(`Ya hay una caja o cuenta llamada "${nombre.trim()}"`), { status: 409 });
+  const r = await pool.query(`UPDATE cajas SET nombre = $1 WHERE id = $2 AND tipo = 'BANCO' RETURNING id, nombre`, [nombre.trim(), cajaId]);
+  if (!r.rows[0]) throw Object.assign(new Error("Esa cuenta de banco no existe"), { status: 404 });
+  return r.rows[0];
+}
+
+/** Suma o resta en una cuenta de banco dentro de una transacción, dejando el movimiento anotado. (Las de banco pueden quedar en negativo.) */
+async function moverBanco(client: import("pg").PoolClient, cajaId: number, monedaId: number, delta: number, usuarioId: number, observacion: string) {
+  let fila = (await client.query(`SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`, [cajaId, monedaId])).rows[0];
+  if (!fila) fila = (await client.query(`INSERT INTO saldos_caja (caja_id, moneda_id, monto) VALUES ($1, $2, 0) RETURNING id, monto`, [cajaId, monedaId])).rows[0];
+  const antes = Number(fila.monto);
+  const despues = Math.round((antes + delta) * 10000) / 10000;
+  await client.query(
+    `INSERT INTO movimientos_caja (caja_id, moneda_id, tipo, monto, saldo_anterior, saldo_nuevo, usuario_id, observacion) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [cajaId, monedaId, delta > 0 ? "INGRESO" : "EGRESO", Math.abs(delta).toFixed(4), antes.toFixed(4), despues.toFixed(4), usuarioId, observacion]
+  );
+  await client.query(`UPDATE saldos_caja SET monto = $1 WHERE id = $2`, [despues.toFixed(4), fila.id]);
+  return { antes, despues };
+}
+
+async function enTransaccion<T>(fn: (client: import("pg").PoolClient) => Promise<T>) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const r = await fn(client);
+    await client.query("COMMIT");
+    return r;
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+async function bancoYMoneda(cajaId: number, monedaCodigo: string) {
+  const caja = (await pool.query(`SELECT id, nombre FROM cajas WHERE id = $1 AND tipo = 'BANCO' AND activo`, [cajaId])).rows[0];
+  if (!caja) throw Object.assign(new Error("Esa cuenta de banco no existe"), { status: 404 });
+  const moneda = (await pool.query(`SELECT id FROM monedas WHERE codigo = $1`, [monedaCodigo])).rows[0];
+  if (!moneda) throw Object.assign(new Error("Esa moneda no existe"), { status: 400 });
+  return { caja: caja as { id: number; nombre: string }, monedaId: moneda.id as number };
+}
+
+/** Un ingreso o un egreso en una cuenta de banco (con su nota: qué fue). */
+export async function movimientoBanco(cajaId: number, d: { tipo: "INGRESO" | "EGRESO"; moneda: string; monto: string; nota: string }, usuarioId: number) {
+  const { caja, monedaId } = await bancoYMoneda(cajaId, d.moneda);
+  const monto = Number(d.monto);
+  if (!(monto > 0)) throw Object.assign(new Error("El monto tiene que ser mayor a cero"), { status: 400 });
+  const r = await enTransaccion((c) => moverBanco(c, caja.id, monedaId, d.tipo === "INGRESO" ? monto : -monto, usuarioId, `${d.tipo === "INGRESO" ? "Ingreso" : "Egreso"}: ${d.nota.trim()}`));
+  return { cuenta: caja.nombre, antes: r.antes.toFixed(4), ahora: r.despues.toFixed(4) };
+}
+
+/** Pasar plata de una cuenta de banco a otra (en la misma moneda). */
+export async function transferirEntreBancos(d: { origenId: number; destinoId: number; moneda: string; monto: string; nota?: string }, usuarioId: number) {
+  if (d.origenId === d.destinoId) throw Object.assign(new Error("Elegí dos cuentas distintas"), { status: 400 });
+  const o = await bancoYMoneda(d.origenId, d.moneda);
+  const dst = await bancoYMoneda(d.destinoId, d.moneda);
+  const monto = Number(d.monto);
+  if (!(monto > 0)) throw Object.assign(new Error("El monto tiene que ser mayor a cero"), { status: 400 });
+  const nota = d.nota?.trim() ? ` · ${d.nota.trim()}` : "";
+  await enTransaccion(async (c) => {
+    // siempre en el mismo orden, para que dos traslados a la vez no se traben
+    const pasos = [
+      { id: o.caja.id, delta: -monto, obs: `Traslado a ${dst.caja.nombre}${nota}` },
+      { id: dst.caja.id, delta: monto, obs: `Traslado desde ${o.caja.nombre}${nota}` },
+    ].sort((a, b) => a.id - b.id);
+    for (const p of pasos) await moverBanco(c, p.id, o.monedaId, p.delta, usuarioId, p.obs);
+  });
+  return { de: o.caja.nombre, a: dst.caja.nombre, monto: monto.toFixed(4), moneda: d.moneda };
+}
+
+/** Los últimos movimientos de una cuenta de banco. */
+export async function movimientosBanco(cajaId: number) {
+  const r = await pool.query(
+    `SELECT k.id, k.tipo, k.monto, k.saldo_nuevo, k.observacion, k.created_at, m.codigo, u.nombre AS usuario
+     FROM movimientos_caja k JOIN monedas m ON m.id = k.moneda_id LEFT JOIN usuarios u ON u.id = k.usuario_id
+     WHERE k.caja_id = $1 ORDER BY k.id DESC LIMIT 30`,
+    [cajaId]
+  );
+  return r.rows;
+}

@@ -176,3 +176,78 @@ export async function obtenerCuadresCaja(filtros: FiltrosCuadres) {
   );
   return result.rows;
 }
+/**
+ * Rendimiento de cada empleado en un día (hora de Colombia): confirmaciones que registró, clientes que atendió en
+ * taquilla (operaciones de ventanilla y confirmaciones que pagó) y cuánto movió, por moneda. El dueño ve a todos;
+ * cada empleado, solo lo suyo.
+ */
+export async function obtenerRendimiento(dia: string, soloUsuarioId: number | null) {
+  const Z = "America/Bogota";
+  const delDia = (col: string) => `(${col} AT TIME ZONE '${Z}')::date = $1::date`;
+  const p = [dia, soloUsuarioId];
+  const filtroU = (col: string) => `($2::int IS NULL OR ${col} = $2)`;
+  const [usuarios, confirmaciones, pagos, operaciones, otros] = await Promise.all([
+    pool.query(`SELECT id, nombre, rol FROM usuarios WHERE activo AND ($1::int IS NULL OR id = $1) ORDER BY nombre`, [soloUsuarioId]),
+    // confirmaciones registradas (lo que se le debe al cliente), por moneda
+    pool.query(
+      `SELECT mc.usuario_id, m.codigo, count(*)::int AS cantidad, sum(mc.monto) AS total, count(DISTINCT cc.tercero_id)::int AS clientes
+       FROM movimientos_cuenta_corriente mc JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id AND cc.modulo = 'CAJA' JOIN monedas m ON m.id = cc.moneda_id
+       WHERE mc.monto > 0 AND NOT mc.anulado AND mc.reverso_de_id IS NULL AND ${delDia("mc.created_at")} AND ${filtroU("mc.usuario_id")}
+       GROUP BY 1, 2`,
+      p
+    ),
+    // confirmaciones que pagó (en taquilla o por otro método)
+    pool.query(
+      `SELECT mc.pagado_por AS usuario_id, m.codigo, count(*)::int AS cantidad, sum(mc.monto) AS total
+       FROM movimientos_cuenta_corriente mc JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id JOIN monedas m ON m.id = cc.moneda_id
+       WHERE mc.pagado_en IS NOT NULL AND ${delDia("mc.pagado_en")} AND ${filtroU("mc.pagado_por")}
+       GROUP BY 1, 2`,
+      p
+    ),
+    // operaciones de ventanilla en taquilla (cada una es un cliente atendido)
+    pool.query(
+      `SELECT o.usuario_id, o.tipo, m.codigo, count(*)::int AS cantidad, sum(o.cantidad) AS total
+       FROM operaciones_taquilla o JOIN monedas m ON m.id = o.moneda_id
+       WHERE o.estado <> 'ANULADA' AND ${delDia("o.created_at")} AND ${filtroU("o.usuario_id")}
+       GROUP BY 1, 2, 3`,
+      p
+    ),
+    // movimientos que cargó en Cuentas Corrientes y Cuentas por Cobrar
+    pool.query(
+      `SELECT mc.usuario_id, cc.modulo, count(*)::int AS cantidad
+       FROM movimientos_cuenta_corriente mc JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id AND cc.modulo IN ('CORRIENTE', 'POR_COBRAR')
+       WHERE NOT mc.anulado AND mc.reverso_de_id IS NULL AND ${delDia("mc.created_at")} AND ${filtroU("mc.usuario_id")}
+       GROUP BY 1, 2`,
+      p
+    ),
+  ]);
+  type Total = { codigo: string; cantidad: number; total: string };
+  const de = <T extends { usuario_id: number }>(filas: T[], id: number) => filas.filter((f) => f.usuario_id === id);
+  const filas = usuarios.rows.map((u) => {
+    const conf = de(confirmaciones.rows, u.id);
+    const pag = de(pagos.rows, u.id);
+    const ops = de(operaciones.rows, u.id);
+    const otr = de(otros.rows, u.id);
+    const suma = (l: { cantidad: number }[]) => l.reduce((s, x) => s + x.cantidad, 0);
+    const porMoneda = (l: { codigo: string; cantidad: number; total: string }[]): Total[] => l.map((x) => ({ codigo: x.codigo, cantidad: x.cantidad, total: String(x.total) }));
+    return {
+      usuarioId: u.id as number,
+      nombre: u.nombre as string,
+      rol: u.rol as string,
+      confirmaciones: { cantidad: suma(conf), clientes: conf.reduce((s, x) => s + x.clientes, 0), porMoneda: porMoneda(conf) },
+      pagadas: { cantidad: suma(pag), porMoneda: porMoneda(pag) },
+      ventanilla: {
+        cantidad: suma(ops),
+        ingresos: porMoneda(ops.filter((o) => o.tipo === "INGRESO")),
+        egresos: porMoneda(ops.filter((o) => o.tipo === "EGRESO")),
+      },
+      // clientes atendidos en taquilla: cada operación de ventanilla y cada confirmación que pagó
+      clientesTaquilla: suma(ops) + suma(pag),
+      cuentasCorrientes: otr.find((x) => x.modulo === "CORRIENTE")?.cantidad ?? 0,
+      cuentasPorCobrar: otr.find((x) => x.modulo === "POR_COBRAR")?.cantidad ?? 0,
+    };
+  });
+  // el dueño ve también a los que no hicieron nada; ordenados por lo que hicieron
+  const total = (f: (typeof filas)[number]) => f.confirmaciones.cantidad + f.clientesTaquilla + f.cuentasCorrientes + f.cuentasPorCobrar;
+  return { dia, empleados: filas.sort((a, b) => total(b) - total(a)) };
+}

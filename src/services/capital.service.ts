@@ -35,7 +35,7 @@ export async function obtenerDatosDelSistema() {
   const sinRetirar = await pool.query(
     `SELECT mc.cuenta_corriente_id AS cuenta_id, min(mc.fecha) AS desde, max(mc.fecha) AS hasta, count(*)::int AS cantidad
      FROM movimientos_cuenta_corriente mc JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
-     WHERE cc.modulo = CAJA AND mc.monto > 0 AND NOT mc.anulado AND mc.reverso_de_id IS NULL AND mc.pagado_en IS NULL
+     WHERE cc.modulo = 'CAJA' AND mc.monto > 0 AND NOT mc.anulado AND mc.reverso_de_id IS NULL AND mc.pagado_en IS NULL
      GROUP BY 1`
   );
   return {

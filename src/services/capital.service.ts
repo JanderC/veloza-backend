@@ -31,8 +31,16 @@ export async function obtenerDatosDelSistema() {
      FROM cajas c LEFT JOIN monedas mc ON mc.id = c.moneda_id
      WHERE c.activo AND c.tipo = 'BANCO' ORDER BY c.id`
   );
+  // de cada cliente de Confirmaciones: desde cuándo tiene confirmaciones sin pagar (no ha venido a retirar)
+  const sinRetirar = await pool.query(
+    `SELECT mc.cuenta_corriente_id AS cuenta_id, min(mc.fecha) AS desde, max(mc.fecha) AS hasta, count(*)::int AS cantidad
+     FROM movimientos_cuenta_corriente mc JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+     WHERE cc.modulo = CAJA AND mc.monto > 0 AND NOT mc.anulado AND mc.reverso_de_id IS NULL AND mc.pagado_en IS NULL
+     GROUP BY 1`
+  );
   return {
     cajas: [...porCaja.values()],
+    sinRetirar: sinRetirar.rows as { cuenta_id: number; desde: string; hasta: string; cantidad: number }[],
     bancos: bancos.rows as { id: number; nombre: string; moneda: string | null; saldos: { codigo: string; monto: string }[] }[],
     confirmacionesPorPagar: porPagar.rows as { codigo: string; total: string; cantidad: number }[],
   };

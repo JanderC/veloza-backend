@@ -251,3 +251,44 @@ export async function obtenerRendimiento(dia: string, soloUsuarioId: number | nu
   const total = (f: (typeof filas)[number]) => f.confirmaciones.cantidad + f.clientesTaquilla + f.cuentasCorrientes + f.cuentasPorCobrar;
   return { dia, empleados: filas.sort((a, b) => total(b) - total(a)) };
 }
+
+/**
+ * Clientes que más vienen (Confirmaciones): cuántas confirmaciones les hicimos en el período, en cuántos días distintos
+ * vinieron, cuánto fue por moneda, cuántas ya retiraron y la última vez. Del que más viene al que menos.
+ */
+export async function obtenerClientesFrecuentes(desde: string, hasta: string, limite = 50) {
+  const r = await pool.query(
+    `WITH conf AS (
+       SELECT cc.tercero_id, m.codigo, mc.monto, mc.fecha, mc.pagado_en
+       FROM movimientos_cuenta_corriente mc
+       JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id AND cc.modulo = $$CAJA$$
+       JOIN monedas m ON m.id = cc.moneda_id
+       WHERE mc.monto > 0 AND NOT mc.anulado AND mc.reverso_de_id IS NULL
+         AND (mc.fecha AT TIME ZONE $$America/Bogota$$)::date BETWEEN $1::date AND $2::date
+     ), por_moneda AS (
+       SELECT tercero_id, codigo, sum(monto) AS total FROM conf GROUP BY 1, 2
+     )
+     SELECT t.id AS tercero_id, t.nombre, t.telefono, count(*)::int AS confirmaciones,
+            count(DISTINCT (c.fecha AT TIME ZONE $$America/Bogota$$)::date)::int AS dias,
+            count(c.pagado_en)::int AS retiradas, min(c.fecha) AS primera, max(c.fecha) AS ultima,
+            (SELECT json_agg(json_build_object($$codigo$$, pm.codigo, $$total$$, pm.total) ORDER BY pm.total DESC) FROM por_moneda pm WHERE pm.tercero_id = t.id) AS totales,
+            (SELECT cc2.id FROM cuentas_corrientes cc2 WHERE cc2.tercero_id = t.id AND cc2.modulo = $$CAJA$$ AND cc2.activo ORDER BY cc2.id LIMIT 1) AS cuenta_id
+     FROM conf c JOIN terceros t ON t.id = c.tercero_id
+     GROUP BY t.id, t.nombre, t.telefono
+     ORDER BY confirmaciones DESC, dias DESC, ultima DESC
+     LIMIT $3`,
+    [desde, hasta, limite]
+  );
+  return r.rows as {
+    tercero_id: number;
+    nombre: string;
+    telefono: string | null;
+    confirmaciones: number;
+    dias: number;
+    retiradas: number;
+    primera: string;
+    ultima: string;
+    totales: { codigo: string; total: string }[];
+    cuenta_id: number | null;
+  }[];
+}

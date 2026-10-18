@@ -7,6 +7,7 @@ import {
   obtenerEstadoCuentaTercero,
   obtenerCuadresCaja,
   obtenerRendimiento,
+  obtenerClientesFrecuentes,
 } from "../services/reportes.service";
 
 export const reportesRouter = Router();
@@ -80,6 +81,19 @@ reportesRouter.get("/rendimiento", requireAuth, async (req, res, next) => {
   try {
     const dia = typeof req.query.dia === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.dia) ? req.query.dia : new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
     res.json(await obtenerRendimiento(dia, req.user!.rol === "ADMIN" ? null : req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Los clientes que más vienen a Confirmaciones en un período
+reportesRouter.get("/clientes-frecuentes", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const dia = (v: unknown) => (typeof v === "string" && /^d{4}-d{2}-d{2}$/.test(v) ? v : null);
+    const hoy = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota" }).format(new Date());
+    const hasta = dia(req.query.hasta) ?? hoy;
+    const desde = dia(req.query.desde) ?? "2000-01-01";
+    res.json(await obtenerClientesFrecuentes(desde, hasta, 50));
   } catch (err) {
     next(err);
   }

@@ -4,6 +4,8 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import {
   cargarSaldoBanco,
   crearCuentaBanco,
+  guardarBorrador,
+  obtenerBorrador,
   guardarCuadre,
   listarCuadres,
   movimientoBanco,
@@ -131,6 +133,24 @@ capitalRouter.post("/bancos/transferir", requireAuth, SOLO_ADMIN, async (req, re
       .object({ origenId: z.number().int().positive(), destinoId: z.number().int().positive(), moneda: MONEDA, monto: MONTO, nota: z.string().max(200).optional() })
       .parse(req.body);
     res.status(201).json(await transferirEntreBancos(d, req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Lo que se va escribiendo (tasas, filas a mano), guardado al instante
+capitalRouter.get("/borrador", requireAuth, SOLO_ADMIN, async (_req, res, next) => {
+  try {
+    res.json(await obtenerBorrador());
+  } catch (err) {
+    next(err);
+  }
+});
+
+capitalRouter.put("/borrador", requireAuth, SOLO_ADMIN, async (req, res, next) => {
+  try {
+    const { datos } = z.object({ datos: z.record(z.unknown()) }).parse(req.body);
+    res.json(await guardarBorrador(datos, req.user!.id));
   } catch (err) {
     next(err);
   }

@@ -198,3 +198,18 @@ export async function movimientosBanco(cajaId: number) {
   );
   return r.rows;
 }
+
+/** Lo que se va escribiendo en el capital (tasas, filas a mano): queda guardado al instante, para todos los computadores. */
+export async function obtenerBorrador() {
+  const r = await pool.query(`SELECT datos, updated_at FROM capital_borrador WHERE id = 1`);
+  return r.rows[0] ?? null;
+}
+
+export async function guardarBorrador(datos: unknown, usuarioId: number) {
+  await pool.query(
+    `INSERT INTO capital_borrador (id, datos, usuario_id, updated_at) VALUES (1, $1, $2, now())
+     ON CONFLICT (id) DO UPDATE SET datos = EXCLUDED.datos, usuario_id = EXCLUDED.usuario_id, updated_at = now()`,
+    [JSON.stringify(datos), usuarioId]
+  );
+  return { guardado: true };
+}

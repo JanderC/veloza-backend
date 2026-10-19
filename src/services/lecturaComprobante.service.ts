@@ -9,7 +9,11 @@ export interface DatosComprobante {
   banco: string | null;
   remitente: string | null; // quién envió
   destinatario: string | null; // a quién se le envió (en Zelle: "A", "Para", "Enviado a")
+  metodo: string | null; // qué es: NEQUI, BANCOLOMBIA, ZELLE, REMITLY, WESTERN_BANCOLOMBIA, WESTERN_TAQUILLA, PAGO_FACTURA, BANCOLOMBIA_INTERNACIONAL
 }
+
+// Los métodos que reconoce Confirmaciones (cada uno con su medio y su comisión)
+const METODOS = ["NEQUI", "BANCOLOMBIA", "ZELLE", "REMITLY", "WESTERN_BANCOLOMBIA", "WESTERN_TAQUILLA", "PAGO_FACTURA", "BANCOLOMBIA_INTERNACIONAL"];
 
 function errorHttp(mensaje: string, status: number) {
   return Object.assign(new Error(mensaje), { status });
@@ -53,6 +57,10 @@ function ordenar(datos: Record<string, unknown>): DatosComprobante {
     banco: limpio(datos.banco),
     remitente: limpio(datos.remitente),
     destinatario: limpio(datos.destinatario),
+    metodo: (() => {
+      const m = texto(datos.metodo)?.toUpperCase().replace(/[\s-]+/g, "_") ?? null;
+      return m && METODOS.includes(m) ? m : null;
+    })(),
   };
 }
 
@@ -73,6 +81,15 @@ const INSTRUCCIONES = [
   '- "banco": el medio o banco: "Zelle", "Bancolombia", "Nequi", "Banco de Venezuela", "Western Union"... Si es una pantalla de Zelle dentro de la app de un banco, es "Zelle".',
   '- "remitente": el nombre de la PERSONA que envía el dinero, solo si aparece como tal ("De", "From", "Enviado por"). El nombre de una cuenta ("Adv SafeBalance Banking - 2839") no es una persona.',
   '- "destinatario": el nombre de la persona que recibe ("A", "Para", "To", "Enviado a", "Inscrito como").',
+  '- "metodo": qué tipo de comprobante es, uno de estos (o null si no se sabe):',
+  '  "NEQUI": comprobante de la app Nequi ("Envío a banco", "Escanea este QR con Nequi", referencias como M05115493);',
+  '  "BANCOLOMBIA": transferencia nacional de Bancolombia ("¡Transferencia exitosa!", "Comprobante No.", "Producto destino / Producto origen");',
+  '  "ZELLE": pago por Zelle, en la app del banco de EE. UU. o como movimiento ("ZELLE PAYMENT TO", "Pago a través de Zelle", Chase, Bank of America);',
+  '  "REMITLY": envío por Remitly (número de referencia que empieza con R, montos en USD y COP, "Remitly");',
+  '  "WESTERN_BANCOLOMBIA": envío de Western Union a una cuenta Bancolombia desde la app ("Número de envío", "Importe enviado", "obtiene ... COP");',
+  '  "WESTERN_TAQUILLA": pago de giro Western Union en ventanilla (formulario con "Código del Giro (MTCN)", Banco Unión, declaración de cambio);',
+  '  "PAGO_FACTURA": recibo de pago de una factura o servicio (Efecty, "Orden de servicio", "Valor recibido");',
+  '  "BANCOLOMBIA_INTERNACIONAL": transferencia internacional a Bancolombia (correo con "Total al destinatario COP", "ID de transferencia").',
 ].join("\n");
 
 // Si Groq rechaza la clave o la red del servidor (401/403), no se insiste en cada comprobante: se deja de intentar
@@ -200,6 +217,12 @@ export async function leerComprobante(imagen: Buffer, mime: string): Promise<Dat
               banco: { type: "string", description: "Banco o medio: Zelle, Bancolombia, Nequi, Banco de Venezuela..." },
               remitente: { type: "string", description: "Nombre de quien envía el dinero" },
               destinatario: { type: "string", description: "Nombre de quien recibe el dinero" },
+              metodo: {
+                type: "string",
+                enum: METODOS,
+                description:
+                  "Tipo de comprobante: NEQUI (app Nequi), BANCOLOMBIA (transferencia nacional), ZELLE, REMITLY, WESTERN_BANCOLOMBIA (Western a cuenta Bancolombia), WESTERN_TAQUILLA (giro Western con MTCN), PAGO_FACTURA (Efecty u orden de servicio), BANCOLOMBIA_INTERNACIONAL (correo con 'Total al destinatario')",
+              },
             },
           },
         },

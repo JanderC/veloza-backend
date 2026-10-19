@@ -1230,7 +1230,7 @@ export async function enviarAConfirmaciones(
     )
   ).rows[0];
   if (!origen) throw errorHttp("Cuenta no encontrada", 404);
-  if (origen.modulo !== "CORRIENTE" && origen.modulo !== "POR_PAGAR") throw errorHttp("Solo se envía a taquilla desde Cuentas Corrientes o Cuentas por Pagar", 400);
+  if (origen.modulo === "CAJA") throw errorHttp("Desde Confirmaciones no se envía a taquilla: ya está allá", 400);
   const entrega = (await pool.query(`SELECT id, codigo, decimales FROM monedas WHERE id = $1`, [d.monedaEntregaId])).rows[0];
   if (!entrega) throw errorHttp("Esa moneda no existe", 400);
   const canal = (await pool.query(`SELECT id, nombre FROM canales_cuenta_corriente WHERE id = $1`, [d.canalId])).rows[0];
@@ -1260,7 +1260,7 @@ export async function enviarAConfirmaciones(
         : d.formula === "DIVIDIR"
           ? `${fmt(monto)} ${origen.codigo} ÷ ${fmt(valor!)}`
           : `${fmt(monto)} ${origen.codigo}`;
-  const titulo = d.descripcion?.trim() || (origen.modulo === "POR_PAGAR" ? "Desde Cuentas por Pagar" : "Desde Cuentas Corrientes");
+  const titulo = d.descripcion?.trim() || (origen.modulo === "POR_PAGAR" ? "Desde Cuentas por Pagar" : origen.modulo === "POR_COBRAR" ? "Desde Cuentas por Cobrar" : "Desde Cuentas Corrientes");
 
   // su cuenta de Confirmaciones en esa moneda (el cliente es uno solo: se usa la que tenga, o se le abre)
   const destino = await crearCuentaCorriente({ terceroId: origen.tercero_id, canalId: canal.id, modulo: "CAJA", monedaId: entrega.id, usarExistente: true, usuarioId });

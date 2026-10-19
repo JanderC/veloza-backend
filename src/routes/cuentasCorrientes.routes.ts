@@ -112,7 +112,7 @@ cuentasCorrientesRouter.get("/", requireAuth, async (req, res, next) => {
         canalId: entero(req.query.canalId),
         buscar: typeof req.query.buscar === "string" ? req.query.buscar : undefined,
         tipoTercero: tipo,
-        vista: req.query.vista === "corrientes" || req.query.vista === "cobrar" || req.query.vista === "cajas" ? req.query.vista : undefined,
+        vista: req.query.vista === "corrientes" || req.query.vista === "cobrar" || req.query.vista === "pagar" || req.query.vista === "cajas" ? req.query.vista : undefined,
       })
     );
   } catch (err) {
@@ -166,7 +166,7 @@ const crearCuentaSchema = z
     canalId: z.number().int().optional(), // sin banco: no es obligatorio
     monedaId: z.number().int(),
     saldoInicial: z.string().optional(),
-    modulo: z.enum(["CORRIENTE", "POR_COBRAR", "CAJA"]).optional(),
+    modulo: z.enum(["CORRIENTE", "POR_COBRAR", "POR_PAGAR", "CAJA"]).optional(),
     referencia: z.string().max(200).optional(),
     grupoCobro: z.string().max(60).optional(),
     usarExistente: z.boolean().optional(),
@@ -209,7 +209,7 @@ cuentasCorrientesRouter.put("/:id/modulo", requireAuth, requireRole("ADMIN", "AS
   try {
     const id = entero(req.params.id);
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
-    const { modulo } = z.object({ modulo: z.enum(["CORRIENTE", "POR_COBRAR", "CAJA"]) }).parse(req.body);
+    const { modulo } = z.object({ modulo: z.enum(["CORRIENTE", "POR_COBRAR", "POR_PAGAR", "CAJA"]) }).parse(req.body);
     res.json(await cambiarModuloCuentaCorriente(id, modulo));
   } catch (err) {
     next(err);
@@ -450,7 +450,7 @@ cuentasCorrientesRouter.post(
 
 const movimientoSchema = z.object({
   cuentaId: z.number().int().positive().optional(),
-  modulo: z.enum(["CORRIENTE", "POR_COBRAR", "CAJA"]).optional(),
+  modulo: z.enum(["CORRIENTE", "POR_COBRAR", "POR_PAGAR", "CAJA"]).optional(),
   terceroId: z.number().int(),
   canalId: z.number().int(),
   monedaId: z.number().int(),

@@ -12,7 +12,7 @@ interface RegistrarMovimientoCCInput {
   // La cuenta exacta: el mismo cliente puede tener cuenta en varios módulos con el mismo medio y moneda. Si no se
   // manda, se busca por tercero + medio + moneda (y el módulo, si viene).
   cuentaId?: number;
-  modulo?: "CORRIENTE" | "POR_COBRAR" | "CAJA";
+  modulo?: "CORRIENTE" | "POR_COBRAR" | "POR_PAGAR" | "CAJA";
   terceroId: number;
   canalId: number;
   monedaId: number; // moneda del saldo de la cuenta corriente (COP o USD, según la fase del Excel)
@@ -317,7 +317,7 @@ interface CrearCuentaInput {
 }
 
 export const CANAL_SIN_BANCO = "SIN_BANCO";
-export type ModuloCuenta = "CORRIENTE" | "POR_COBRAR" | "CAJA";
+export type ModuloCuenta = "CORRIENTE" | "POR_COBRAR" | "POR_PAGAR" | "CAJA";
 
 /** Cobrar en la misma moneda de la contabilidad no necesita tasa; en otra, la tasa manual es obligatoria. */
 function validarCobro(monedaId: number, monedaCobroId: number | null, tasaCobro?: string) {
@@ -541,7 +541,7 @@ export async function cambiarModuloCuentaCorriente(id: number, modulo: ModuloCue
 
 /** Cuentas por Cobrar: cambiar de grupo a un cliente ("Cerveloza", "Zelle", "Préstamos"...). */
 export async function cambiarGrupoCobro(id: number, grupo: string | null) {
-  const r = await pool.query(`UPDATE cuentas_corrientes SET grupo_cobro = $1 WHERE id = $2 AND modulo = 'POR_COBRAR' RETURNING id`, [grupo?.trim() || null, id]);
+  const r = await pool.query(`UPDATE cuentas_corrientes SET grupo_cobro = $1 WHERE id = $2 AND modulo IN ('POR_COBRAR', 'POR_PAGAR') RETURNING id`, [grupo?.trim() || null, id]);
   if (!r.rows[0]) throw errorHttp("Cuenta por cobrar no encontrada", 404);
   return obtenerCuentaCorriente(id);
 }
@@ -558,13 +558,15 @@ export async function listarCuentasCorrientes(filtros: {
   buscar?: string;
   tipoTercero?: string;
   // corrientes: las que se llevan en Cuentas Corrientes. cobrar: las pasadas a Cuentas por Cobrar + toda cuenta con saldo (me deben o yo debo)
-  vista?: "corrientes" | "cobrar" | "cajas";
+  vista?: "corrientes" | "cobrar" | "pagar" | "cajas";
 }) {
   const cond: string[] = ["cc.activo"]; // las eliminadas no se listan
   if (filtros.vista === "corrientes") cond.push(`cc.modulo = 'CORRIENTE'`);
   if (filtros.vista === "cajas") cond.push(`cc.modulo = 'CAJA'`);
   // Cuentas por Cobrar lleva solo sus propios clientes (ya no se alimenta de las cuentas corrientes con saldo)
   if (filtros.vista === "cobrar") cond.push(`cc.modulo = 'POR_COBRAR'`);
+  // Cuentas por Pagar: lo que se le debe a cada cliente, hasta que se le envía a taquilla
+  if (filtros.vista === "pagar") cond.push(`cc.modulo = 'POR_PAGAR'`);
   const valores: unknown[] = [];
   if (filtros.terceroId) {
     valores.push(filtros.terceroId);
@@ -1228,7 +1230,7 @@ export async function enviarAConfirmaciones(
     )
   ).rows[0];
   if (!origen) throw errorHttp("Cuenta no encontrada", 404);
-  if (origen.modulo !== "CORRIENTE") throw errorHttp("Solo se envía a Confirmaciones desde Cuentas Corrientes", 400);
+  if (origen.modulo !== "CORRIENTE" && origen.modulo !== "POR_PAGAR") throw errorHttp("Solo se envía a taquilla desde Cuentas Corrientes o Cuentas por Pagar", 400);
   const entrega = (await pool.query(`SELECT id, codigo, decimales FROM monedas WHERE id = $1`, [d.monedaEntregaId])).rows[0];
   if (!entrega) throw errorHttp("Esa moneda no existe", 400);
   const canal = (await pool.query(`SELECT id, nombre FROM canales_cuenta_corriente WHERE id = $1`, [d.canalId])).rows[0];
@@ -1258,7 +1260,7 @@ export async function enviarAConfirmaciones(
         : d.formula === "DIVIDIR"
           ? `${fmt(monto)} ${origen.codigo} ÷ ${fmt(valor!)}`
           : `${fmt(monto)} ${origen.codigo}`;
-  const titulo = d.descripcion?.trim() || "Desde Cuentas Corrientes";
+  const titulo = d.descripcion?.trim() || (origen.modulo === "POR_PAGAR" ? "Desde Cuentas por Pagar" : "Desde Cuentas Corrientes");
 
   // su cuenta de Confirmaciones en esa moneda (el cliente es uno solo: se usa la que tenga, o se le abre)
   const destino = await crearCuentaCorriente({ terceroId: origen.tercero_id, canalId: canal.id, modulo: "CAJA", monedaId: entrega.id, usarExistente: true, usuarioId });
@@ -1288,7 +1290,7 @@ export async function enviarAConfirmaciones(
       monedaId: origen.moneda_id,
       tipo: "CARGO",
       monto: monto.toFixed(4),
-      descripcion: `Enviado a Confirmaciones: ${fmt(resultado)} ${entrega.codigo} (${detalle})`,
+      descripcion: `Enviado a taquilla: ${fmt(resultado)} ${entrega.codigo} (${detalle})`,
       usuarioId,
     });
     return { confirmacionId: confirmacion.movimiento.id as number, corrienteId: corriente.movimiento.id as number, cuentaConfirmacionesId: destino.id as number, resultado: resultado.toFixed(decimales), moneda: entrega.codigo as string };

@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from "../middleware/auth";
 import { obtenerTasasExternas, obtenerHistoricoMercado } from "../services/tasasExternas.service";
 import { obtenerTrmColombia } from "../services/trmColombia.service";
 import { registrarLineaCotizacion, obtenerCotizacionesVigentes } from "../services/cotizacionesDetalle.service";
+import { actualizarTasaTablero, guardarTablero, historialTablero, obtenerTablero } from "../services/tableroTasas.service";
 
 export const tasasRouter = Router();
 
@@ -146,6 +147,44 @@ tasasRouter.get("/detalle", requireAuth, async (_req, res, next) => {
   try {
     const datos = await obtenerCotizacionesVigentes();
     res.json(datos);
+  } catch (err) {
+    next(err);
+  }
+});
+// ---------- La "Tasa del día" (el tablero que se publica) ----------
+// claves cortas ("dolar.compra.100-50") y valores escritos como número ("3200", "5" para un %)
+const CLAVE_TABLERO = z.string().regex(/^[a-z0-9.-]{1,40}$/);
+const VALOR_TABLERO = z.string().max(20).regex(/^-?d*([.,]d+)?%?$/, "Valor inválido");
+
+tasasRouter.get("/tablero", requireAuth, async (_req, res, next) => {
+  try {
+    res.json(await obtenerTablero());
+  } catch (err) {
+    next(err);
+  }
+});
+
+tasasRouter.get("/tablero/historial", requireAuth, async (_req, res, next) => {
+  try {
+    res.json(await historialTablero(30));
+  } catch (err) {
+    next(err);
+  }
+});
+
+tasasRouter.put("/tablero", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const { valores } = z.object({ valores: z.record(CLAVE_TABLERO, VALOR_TABLERO) }).parse(req.body);
+    res.json(await guardarTablero(valores, req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+tasasRouter.patch("/tablero", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const { clave, valor } = z.object({ clave: CLAVE_TABLERO, valor: VALOR_TABLERO }).parse(req.body);
+    res.json(await actualizarTasaTablero(clave, valor, req.user!.id));
   } catch (err) {
     next(err);
   }

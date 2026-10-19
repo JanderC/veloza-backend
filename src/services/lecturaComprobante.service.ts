@@ -13,7 +13,7 @@ export interface DatosComprobante {
 }
 
 // Los métodos que reconoce Confirmaciones (cada uno con su medio y su comisión)
-const METODOS = ["NEQUI", "BANCOLOMBIA", "ZELLE", "REMITLY", "WESTERN_BANCOLOMBIA", "WESTERN_TAQUILLA", "PAGO_FACTURA", "BANCOLOMBIA_INTERNACIONAL"];
+const METODOS = ["NEQUI", "BANCOLOMBIA", "ZELLE", "BOLIVARES", "USDT", "REMITLY", "WESTERN_BANCOLOMBIA", "WESTERN_TAQUILLA", "PAGO_FACTURA", "BANCOLOMBIA_INTERNACIONAL"];
 
 function errorHttp(mensaje: string, status: number) {
   return Object.assign(new Error(mensaje), { status });
@@ -85,6 +85,8 @@ const INSTRUCCIONES = [
   '  "NEQUI": comprobante de la app Nequi ("Envío a banco", "Escanea este QR con Nequi", referencias como M05115493);',
   '  "BANCOLOMBIA": transferencia nacional de Bancolombia ("¡Transferencia exitosa!", "Comprobante No.", "Producto destino / Producto origen");',
   '  "ZELLE": pago por Zelle, en la app del banco de EE. UU. o como movimiento ("ZELLE PAYMENT TO", "Pago a través de Zelle", Chase, Bank of America);',
+  '  "BOLIVARES": transferencia o pago móvil de un banco de Venezuela (Banco de Venezuela, Banesco, Mercantil, Provincial, BNC, Bancamiga…), en bolívares;',
+  '  "USDT": envío de USDT (Binance, Tether, TRC20);',
   '  "REMITLY": envío por Remitly (número de referencia que empieza con R, montos en USD y COP, "Remitly");',
   '  "WESTERN_BANCOLOMBIA": envío de Western Union a una cuenta Bancolombia desde la app ("Número de envío", "Importe enviado", "obtiene ... COP");',
   '  "WESTERN_TAQUILLA": pago de giro Western Union en ventanilla (formulario con "Código del Giro (MTCN)", Banco Unión, declaración de cambio);',
@@ -221,7 +223,7 @@ export async function leerComprobante(imagen: Buffer, mime: string): Promise<Dat
                 type: "string",
                 enum: METODOS,
                 description:
-                  "Tipo de comprobante: NEQUI (app Nequi), BANCOLOMBIA (transferencia nacional), ZELLE, REMITLY, WESTERN_BANCOLOMBIA (Western a cuenta Bancolombia), WESTERN_TAQUILLA (giro Western con MTCN), PAGO_FACTURA (Efecty u orden de servicio), BANCOLOMBIA_INTERNACIONAL (correo con 'Total al destinatario')",
+                  "Tipo de comprobante: NEQUI (app Nequi), BANCOLOMBIA (transferencia nacional), ZELLE, BOLIVARES (banco de Venezuela o pago móvil), USDT (Binance), REMITLY, WESTERN_BANCOLOMBIA (Western a cuenta Bancolombia), WESTERN_TAQUILLA (giro Western con MTCN), PAGO_FACTURA (Efecty u orden de servicio), BANCOLOMBIA_INTERNACIONAL (correo con 'Total al destinatario')",
               },
             },
           },

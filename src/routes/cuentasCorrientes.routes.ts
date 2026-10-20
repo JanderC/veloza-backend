@@ -36,6 +36,7 @@ import {
 } from "../services/cuentaCorriente.service";
 import { importarSaldosIniciales, ResultadoFila } from "../services/importacionSaldos.service";
 import { leerComprobante } from "../services/lecturaComprobante.service";
+import { leerTextoEnServidor } from "../services/ocrServidor.service";
 
 export const cuentasCorrientesRouter = Router();
 const estadoSchema = z.object({ estado: z.enum(["DISPONIBLE", "BLOQUEADA", "CERRADA"]) });
@@ -440,6 +441,23 @@ cuentasCorrientesRouter.post(
       if (!req.file) return res.status(400).json({ error: "Adjuntá la imagen del comprobante" });
       if (!/^image\/(jpeg|png|webp|gif)$/.test(req.file.mimetype)) return res.status(400).json({ error: "El comprobante tiene que ser una imagen (JPG, PNG o WebP)" });
       res.json(await leerComprobante(req.file.buffer, req.file.mimetype));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// El texto de la captura leído en el servidor: respaldo cuando el navegador no puede leerla y la IA no está
+cuentasCorrientesRouter.post(
+  "/leer-texto",
+  requireAuth,
+  requireRole("ADMIN", "ASESOR", "CAJERO"),
+  upload.single("imagen"),
+  async (req, res, next) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: "Adjuntá la imagen del comprobante" });
+      if (!/^image\/(jpeg|png|webp|gif)$/.test(req.file.mimetype)) return res.status(400).json({ error: "El comprobante tiene que ser una imagen (JPG, PNG o WebP)" });
+      res.json({ texto: await leerTextoEnServidor(req.file.buffer) });
     } catch (err) {
       next(err);
     }

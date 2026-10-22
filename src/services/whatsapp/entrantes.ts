@@ -1,3 +1,4 @@
+import { anotarSolicitud } from "../solicitudesWa.service";
 import {
   getContentType,
   isJidBroadcast,
@@ -176,6 +177,11 @@ async function procesarUno(msg: WAMessage, tipoUpsert: "notify" | "append", line
   if (tipoUpsert !== "notify") return;
   // En los grupos no hay bot ni avisos automáticos: se leen y se responden a mano
   if (grupo) return;
+
+  // Atención de Solicitudes: lo que pide el cliente queda en la bandeja; lo que responde el negocio la va cerrando
+  void anotarSolicitud({ jid, linea, deMi, tipo: p.tipo, texto: p.texto ?? null, mensajeId: Number(fila.id), fecha: fechaDe(msg) }).catch((e) =>
+    console.error("[solicitudes]", (e as Error).message)
+  );
 
   // El bot y el asistente del dueño solo existen en la línea 1. Las otras líneas son para leer y responder
   // a mano: lo que entra queda en la bandeja y nada contesta solo.

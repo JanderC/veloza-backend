@@ -1,4 +1,5 @@
 import { generateMessageIDV2 } from "@whiskeysockets/baileys";
+import { anotarSolicitud } from "../solicitudesWa.service";
 import { pool } from "../../db/pool";
 import { leerConfig } from "./config";
 import { actualizarEstadoMensaje, guardarMensaje, marcarErrorMensaje, obtenerChat, vistaPrevia, type Autor, type FilaMensaje, type TipoMensaje } from "./mensajes";
@@ -278,6 +279,8 @@ export async function enviarMensaje(op: OpcionesEnvio): Promise<FilaMensaje> {
   });
   if (!fila) throw new Error("No se pudo registrar el mensaje");
   anotarEnvio(op, frio);
+  // Atención de Solicitudes: responder en el chat (desde el sistema) cierra lo que se resuelve con una respuesta
+  void anotarSolicitud({ jid: op.jid, linea, deMi: true, tipo, texto: op.texto ?? null, mensajeId: Number(fila.id) }).catch(() => {});
 
   const contenido: ContenidoSalida = op.sticker
     ? { sticker: op.sticker.buffer }

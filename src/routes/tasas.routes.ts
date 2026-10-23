@@ -154,7 +154,11 @@ tasasRouter.get("/detalle", requireAuth, async (_req, res, next) => {
 // ---------- La "Tasa del día" (el tablero que se publica) ----------
 // claves cortas ("dolar.compra.100-50") y valores escritos como número ("3200", "5" para un %)
 const CLAVE_TABLERO = z.string().regex(/^[a-z0-9.-]{1,40}$/);
-const VALOR_TABLERO = z.string().max(20).regex(/^-?d*([.,]d+)?%?$/, "Valor inválido");
+// un número con punto o coma decimal, con signo o % si hace falta ("3200", "3.5", "5%", "-10%"); vacío = sin valor
+const VALOR_TABLERO = z
+  .string()
+  .max(20)
+  .regex(/^-?\d*([.,]\d+)?%?$/, "Hay una tasa con un valor que no es un número");
 
 tasasRouter.get("/tablero", requireAuth, async (_req, res, next) => {
   try {

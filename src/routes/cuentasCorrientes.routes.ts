@@ -339,7 +339,7 @@ cuentasCorrientesRouter.post("/movimientos/:id/confirmar", requireAuth, requireR
   try {
     const id = entero(req.params.id);
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
-    res.json(await confirmarMovimiento(id));
+    res.json(await confirmarMovimiento(id, req.user!.id));
   } catch (err) {
     next(err);
   }

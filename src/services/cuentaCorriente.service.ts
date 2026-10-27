@@ -903,10 +903,12 @@ export async function urlComprobanteMovimiento(movimientoId: number) {
 }
 
 /** Western (u otro medio que tarda) ya verificó: el movimiento en proceso pasa a confirmado. */
-export async function confirmarMovimiento(movimientoId: number) {
+export async function confirmarMovimiento(movimientoId: number, usuarioId?: number, cajaId?: number) {
+  // queda quién la confirmó y, si fue en una taquilla, en cuál (para su historial)
   const r = await pool.query(
-    `UPDATE movimientos_cuenta_corriente SET estado_confirmacion = 'CONFIRMADA' WHERE id = $1 AND estado_confirmacion = 'EN_PROCESO' AND NOT anulado RETURNING id`,
-    [movimientoId]
+    `UPDATE movimientos_cuenta_corriente SET estado_confirmacion = 'CONFIRMADA', confirmado_en = now(), confirmado_por = $2, confirmado_caja_id = $3
+     WHERE id = $1 AND estado_confirmacion = 'EN_PROCESO' AND NOT anulado RETURNING id`,
+    [movimientoId, usuarioId ?? null, cajaId ?? null]
   );
   if (!r.rows[0]) throw errorHttp("Ese movimiento no está en proceso de confirmación", 409);
   return { id: movimientoId, estado_confirmacion: "CONFIRMADA" as const };

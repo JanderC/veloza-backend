@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "async_hooks";
 import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { pool } from "../db/pool";
-import { registrarMovimientoCuentaCorriente } from "./cuentaCorriente.service";
+import { confirmarMovimiento, registrarMovimientoCuentaCorriente } from "./cuentaCorriente.service";
 import { abrirTurnoSiFalta } from "./cierreCaja.service";
 import { aplicarMovimientoLeg } from "./transaccionService";
 import { generarUrlTemporal, subirArchivo } from "./almacenamiento.service";
@@ -200,6 +200,87 @@ export async function buscarSolicitudesPagadas(texto: string) {
     [q]
   );
   return r.rows;
+}
+
+/** Confirmar desde la taquilla una transferencia en proceso (Western, Zelle): queda en el historial de esta taquilla. */
+export async function confirmarSolicitudEnTaquilla(movimientoId: number, usuarioId: number) {
+  const caja = await cajaDeTaquilla();
+  await confirmarMovimiento(movimientoId, usuarioId, caja.id);
+  return obtenerTaquilla();
+}
+
+/**
+ * El historial de esta taquilla en un rango de días (hora de Colombia): sus cierres (cuánto abrió, cuánto debía haber,
+ * cuánto se contó y la diferencia, por moneda), lo que entregó (las confirmaciones pagadas acá), las transferencias que
+ * confirmó y sus ingresos y egresos de ventanilla, con los totales por moneda.
+ */
+export async function historialTaquilla(desde: string, hasta: string) {
+  const caja = await cajaDeTaquilla();
+  const enRango = (col: string) => `(${col} AT TIME ZONE '${ZONA}')::date BETWEEN $2::date AND $3::date`;
+  const valores = [caja.id, desde, hasta];
+
+  // un cierre son las filas de cada moneda que se cerraron juntas
+  const filasCierre = await pool.query(
+    `SELECT cz.fecha_apertura, cz.fecha_cierre, cz.saldo_inicial, cz.saldo_esperado, cz.saldo_real, cz.diferencia, m.codigo, u.nombre AS usuario_nombre
+     FROM cierres_caja cz JOIN monedas m ON m.id = cz.moneda_id JOIN usuarios u ON u.id = cz.usuario_id
+     WHERE cz.caja_id = $1 AND cz.estado = 'CERRADA' AND ${enRango("cz.fecha_cierre")}
+     ORDER BY cz.fecha_cierre DESC, array_position($4::text[], m.codigo::text)`,
+    [...valores, MONEDAS_TAQUILLA as unknown as string[]]
+  );
+  const cierres: { abierta_en: string; cerrada_en: string; abrio: string; monedas: unknown[]; entregas: number; operaciones: number }[] = [];
+  for (const f of filasCierre.rows) {
+    const clave = new Date(f.fecha_cierre).getTime();
+    let c = cierres.find((x) => new Date(x.cerrada_en).getTime() === clave);
+    if (!c) {
+      c = { abierta_en: f.fecha_apertura, cerrada_en: f.fecha_cierre, abrio: f.usuario_nombre, monedas: [], entregas: 0, operaciones: 0 };
+      cierres.push(c);
+    }
+    if (new Date(f.fecha_apertura) < new Date(c.abierta_en)) c.abierta_en = f.fecha_apertura;
+    c.monedas.push({ codigo: f.codigo, inicial: f.saldo_inicial, esperado: f.saldo_esperado, contado: f.saldo_real, diferencia: f.diferencia });
+  }
+
+  const entregas = await pool.query(`${SELECT_SOLICITUD} AND mc.pagado_caja_id = $1 AND mc.pagado_en IS NOT NULL AND ${enRango("mc.pagado_en")} ORDER BY mc.pagado_en DESC`, valores);
+  const confirmadas = await pool.query(
+    `SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, mc.confirmado_en, uc.nombre AS confirmado_por_nombre, m.codigo AS moneda_codigo, t.nombre AS cliente_nombre, mc.pagado_en
+     FROM movimientos_cuenta_corriente mc
+     JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+     JOIN monedas m ON m.id = cc.moneda_id
+     JOIN terceros t ON t.id = cc.tercero_id
+     LEFT JOIN usuarios uc ON uc.id = mc.confirmado_por
+     WHERE mc.confirmado_caja_id = $1 AND ${enRango("mc.confirmado_en")} ORDER BY mc.confirmado_en DESC`,
+    valores
+  );
+  const operaciones = await pool.query(`${SELECT_OPERACION} WHERE o.caja_id = $1 AND ${enRango("o.created_at")} ORDER BY o.id DESC`, valores);
+
+  // cuántas entregas y operaciones tuvo cada cierre (entre que abrió y cerró)
+  for (const c of cierres) {
+    const ini = new Date(c.abierta_en).getTime();
+    const fin = new Date(c.cerrada_en).getTime();
+    const dentro = (f: string | Date | null) => !!f && new Date(f).getTime() >= ini && new Date(f).getTime() <= fin;
+    c.entregas = entregas.rows.filter((e) => dentro(e.pagado_en)).length;
+    c.operaciones = operaciones.rows.filter((o) => dentro(o.created_at)).length;
+  }
+
+  // lo entregado por moneda y por cómo (efectivo o por transferencia)
+  const totales = new Map<string, { codigo: string; medio: string; total: Decimal; cantidad: number }>();
+  for (const e of entregas.rows) {
+    const medio = e.pagado_medio === "EFECTIVO" ? "EFECTIVO" : "TRANSFERENCIA";
+    const k = `${e.moneda_codigo}-${medio}`;
+    const t = totales.get(k) ?? { codigo: e.moneda_codigo, medio, total: new Decimal(0), cantidad: 0 };
+    t.total = t.total.plus(e.monto);
+    t.cantidad++;
+    totales.set(k, t);
+  }
+  return {
+    caja,
+    desde,
+    hasta,
+    cierres,
+    entregas: entregas.rows,
+    totalesEntregas: [...totales.values()].map((t) => ({ ...t, total: t.total.toFixed(4) })),
+    confirmadas: confirmadas.rows,
+    operaciones: operaciones.rows,
+  };
 }
 
 /** "Esa solicitud ya se pagó en Taquilla 1 el 06/10 3:15 p. m.": dónde y cuándo se pagó, para el que intenta pagarla otra vez. */

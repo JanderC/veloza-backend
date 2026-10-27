@@ -8,6 +8,8 @@ import {
   buscarSolicitudesPagadas,
   cerrarSesionTaquilla,
   confirmarOperacionTaquilla,
+  confirmarSolicitudEnTaquilla,
+  historialTaquilla,
   crearOperacionTaquilla,
   enTaquilla,
   moverConCajaFuerte,
@@ -79,6 +81,28 @@ taquillaRouter.post("/caja-fuerte", requireAuth, ROLES, async (req, res, next) =
 taquillaRouter.get("/solicitudes/pagadas", requireAuth, ROLES, async (req, res, next) => {
   try {
     res.json(await buscarSolicitudesPagadas(String(req.query.q ?? "")));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// El historial de la taquilla: sus cierres, lo que entregó, las transferencias que confirmó y sus operaciones
+taquillaRouter.get("/historial", requireAuth, ROLES, async (req, res, next) => {
+  try {
+    const FECHA = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+    const d = z.object({ desde: FECHA, hasta: FECHA }).parse(req.query);
+    res.json(await t(req, () => historialTaquilla(d.desde, d.hasta)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Confirmar una transferencia en proceso (Western, Zelle) desde la taquilla: queda en el historial de esta taquilla
+taquillaRouter.post("/solicitudes/:id/confirmar", requireAuth, ROLES, async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "id inválido" });
+    res.json(await t(req, () => confirmarSolicitudEnTaquilla(id, req.user!.id)));
   } catch (err) {
     next(err);
   }

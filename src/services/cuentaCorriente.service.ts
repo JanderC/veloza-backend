@@ -941,6 +941,7 @@ export async function editarMovimientoCuentaCorriente(
     if (!delta.isZero()) {
       if (m.movimiento_caja_id) throw errorHttp("Este movimiento también movió una caja: el monto no se edita. Anulalo y cargalo de nuevo.", 409);
       if (m.pagado_en) throw errorHttp("Este movimiento ya se pagó en taquilla: el monto no se edita.", 409);
+      if (Number(m.pagado_parcial) > 0) throw errorHttp("A esta confirmación ya se le pagó una parte por banco: el monto no se edita. Anulá ese pago primero.", 409);
       const esPago = await client.query(`SELECT 1 FROM movimientos_cuenta_corriente WHERE pagado_movimiento_id = $1 LIMIT 1`, [movimientoId]);
       if (esPago.rows[0]) throw errorHttp("Este movimiento es el pago de otro en taquilla: el monto no se edita.", 409);
     }
@@ -1017,6 +1018,7 @@ export async function moverMovimientoCuentaCorriente(movimientoId: number, cuent
     if (origen.moneda_id !== destino.moneda_id) throw errorHttp("Esa cuenta lleva otra moneda: el movimiento no se puede pasar ahí", 400);
     const m = (await client.query(`SELECT * FROM movimientos_cuenta_corriente WHERE id = $1 FOR UPDATE`, [movimientoId])).rows[0];
     if (m.anulado || m.reverso_de_id) throw errorHttp("Un movimiento anulado (o su reverso) no se mueve", 409);
+    if (Number(m.pagado_parcial) > 0 || m.pago_parcial_de_id) throw errorHttp("Esta confirmación tiene un pago parcial por banco: no se mueve", 409);
     if (m.pagado_en) throw errorHttp("Este movimiento ya se pagó: no se mueve", 409);
     const esPago = await client.query(`SELECT 1 FROM movimientos_cuenta_corriente WHERE pagado_movimiento_id = $1 LIMIT 1`, [movimientoId]);
     if (esPago.rows[0]) throw errorHttp("Este movimiento es el pago de otro: no se mueve", 409);
@@ -1114,7 +1116,7 @@ export async function pagarConfirmacionPorOtroMetodo(movimientoId: number, cajaI
     `UPDATE movimientos_cuenta_corriente mc SET pagado_en = now(), pagado_por = $2, pagado_medio = $3, pagado_caja_id = $4
      FROM cuentas_corrientes cc
      WHERE mc.id = $1 AND cc.id = mc.cuenta_corriente_id AND mc.pagado_en IS NULL AND NOT mc.anulado
-     RETURNING mc.id, mc.monto, mc.descripcion, cc.id AS cuenta_id, cc.tercero_id, cc.canal_id, cc.moneda_id`,
+     RETURNING mc.id, mc.monto - mc.pagado_parcial AS monto, mc.descripcion, cc.id AS cuenta_id, cc.tercero_id, cc.canal_id, cc.moneda_id`,
     [movimientoId, usuarioId, medio, caja.id]
   );
   const s = apartada.rows[0];
@@ -1157,8 +1159,9 @@ export async function anularMovimiento(movimientoId: number, usuarioId: number) 
   const m = r.rows[0];
   if (!m) throw errorHttp("Movimiento no encontrado", 404);
   if (m.anulado) throw errorHttp("Ese movimiento ya está anulado", 409);
+  if (Number(m.pagado_parcial) > 0) throw errorHttp("A esta confirmación ya se le pagó una parte por banco: anulá primero ese pago (el movimiento \"Pago parcial por…\").", 409);
 
-  return registrarMovimientoCuentaCorriente({
+  const reverso = await registrarMovimientoCuentaCorriente({
     cuentaId: m.cuenta_corriente_id,
     terceroId: m.tercero_id,
     canalId: m.canal_id,
@@ -1186,6 +1189,62 @@ export async function anularMovimiento(movimientoId: number, usuarioId: number) 
         }
       : {}),
   });
+  // se anuló el pago parcial de una confirmación: esa parte vuelve a quedar por pagar (en taquilla)
+  if (m.pago_parcial_de_id) {
+    await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_parcial = GREATEST(pagado_parcial - $1::numeric, 0) WHERE id = $2`, [new Decimal(m.monto).abs().toFixed(4), m.pago_parcial_de_id]);
+  }
+  return reverso;
+}
+
+/**
+ * Confirmaciones: una parte se le paga al cliente ya, por una cuenta de la empresa (ej. 400.000 por Bancolombia), y el
+ * resto queda para retirar en efectivo en taquilla. El pago sale de esa cuenta y se anota en la hoja del cliente; la
+ * confirmación queda por pagar solo por lo que falta, que es lo que ve la taquilla.
+ */
+export async function pagarParteConfirmacion(movimientoId: number, cajaId: number, montoParte: string, usuarioId: number) {
+  const parte = aDecimal(montoParte, "Lo que se paga por banco");
+  if (!parte.isPositive() || parte.isZero()) throw errorHttp("Lo que se paga por banco tiene que ser mayor a cero", 400);
+  const caja = (await pool.query(`SELECT id, nombre FROM cajas WHERE id = $1 AND tipo = 'BANCO' AND activo`, [cajaId])).rows[0];
+  if (!caja) throw errorHttp("Esa cuenta de la empresa no existe o está inactiva", 404);
+  // se aparta la parte: si dos personas pagan a la vez, solo pasa si todavía alcanza
+  const apartada = await pool.query(
+    `UPDATE movimientos_cuenta_corriente mc SET pagado_parcial = mc.pagado_parcial + $2
+     FROM cuentas_corrientes cc
+     WHERE mc.id = $1 AND cc.id = mc.cuenta_corriente_id AND cc.modulo = 'CAJA' AND mc.pagado_en IS NULL AND NOT mc.anulado AND mc.reverso_de_id IS NULL
+       AND mc.monto > 0 AND COALESCE(mc.estado_confirmacion, 'CONFIRMADA') <> 'EN_PROCESO' AND mc.pagado_parcial + $2 < mc.monto
+     RETURNING mc.id, mc.monto, mc.pagado_parcial, mc.descripcion, cc.id AS cuenta_id, cc.tercero_id, cc.canal_id, cc.moneda_id`,
+    [movimientoId, parte.toFixed(4)]
+  );
+  const s = apartada.rows[0];
+  if (!s) {
+    const m = (await pool.query(`SELECT monto, pagado_parcial, pagado_en, estado_confirmacion FROM movimientos_cuenta_corriente WHERE id = $1`, [movimientoId])).rows[0];
+    if (!m) throw errorHttp("Confirmación no encontrada", 404);
+    if (m.pagado_en) throw errorHttp("Esa confirmación ya está pagada", 409);
+    if (m.estado_confirmacion === "EN_PROCESO") throw errorHttp("Esa transferencia todavía no está confirmada: primero se confirma y después se paga", 409);
+    throw errorHttp(`Lo que se paga por banco tiene que ser menos que lo que falta (${new Decimal(m.monto).minus(m.pagado_parcial).toFixed(2)}). Si es todo, usá "Otro método de pago".`, 400);
+  }
+  try {
+    const referencia = String(s.descripcion ?? "").split(" · ")[1];
+    const pago = await registrarMovimientoCuentaCorriente({
+      cuentaId: s.cuenta_id,
+      terceroId: s.tercero_id,
+      canalId: s.canal_id,
+      monedaId: s.moneda_id,
+      tipo: "ABONO",
+      monto: parte.negated().toFixed(4),
+      descripcion: `Pago parcial por ${caja.nombre}${referencia ? ` · ${referencia}` : ""}`,
+      usuarioId,
+      cajaId: caja.id,
+      montoCaja: parte.negated().toFixed(4),
+      monedaCajaId: s.moneda_id,
+    });
+    await pool.query(`UPDATE movimientos_cuenta_corriente SET pago_parcial_de_id = $1 WHERE id = $2`, [movimientoId, pago.movimiento.id]);
+    return { cuenta: caja.nombre as string, pagado: parte.toFixed(4), falta: new Decimal(s.monto).minus(s.pagado_parcial).toFixed(4), pagoId: pago.movimiento.id as number };
+  } catch (err) {
+    // no se pudo anotar el pago: la parte vuelve a quedar por pagar
+    await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_parcial = GREATEST(pagado_parcial - $1::numeric, 0) WHERE id = $2`, [parte.toFixed(4), movimientoId]);
+    throw err;
+  }
 }
 
 

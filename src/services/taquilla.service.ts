@@ -52,7 +52,7 @@ async function monedasDeTaquilla(db: { query: PoolClient["query"] } = pool) {
 // Todas las compras de Confirmaciones: lo que hay que entregarle al cliente en efectivo.
 // Las que Western todavía no confirmó también llegan, marcadas, y no se pueden pagar hasta que se confirmen.
 const SELECT_SOLICITUD = `
-  SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, mc.cantidad_base, mc.tasa, mc.comision_descontada, mc.comision_incluida, mc.cuenta_destino,
+  SELECT mc.id, mc.fecha, mc.descripcion, mc.monto - mc.pagado_parcial AS monto, mc.monto AS monto_total, mc.pagado_parcial, mc.cantidad_base, mc.tasa, mc.comision_descontada, mc.comision_incluida, mc.cuenta_destino,
          mc.estado_confirmacion, (mc.comprobante_key IS NOT NULL) AS tiene_comprobante,
          mc.pagado_en, mc.pagado_medio, mc.pagado_caja_id, cp.nombre AS pagado_caja_nombre, up.nombre AS pagado_por_nombre, ur.nombre AS registrado_por_nombre,
          cc.id AS cuenta_id, cc.referencia AS cliente_referencia, m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,
@@ -461,7 +461,7 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
     `UPDATE movimientos_cuenta_corriente mc SET pagado_en = now(), pagado_por = $2, pagado_medio = $3, pagado_caja_id = $4
      FROM cuentas_corrientes cc
      WHERE mc.id = $1 AND cc.id = mc.cuenta_corriente_id AND mc.pagado_en IS NULL AND NOT mc.anulado
-     RETURNING mc.id, mc.monto, mc.descripcion, cc.id AS cuenta_id, cc.tercero_id, cc.canal_id, cc.moneda_id`,
+     RETURNING mc.id, mc.monto - mc.pagado_parcial AS monto, mc.descripcion, cc.id AS cuenta_id, cc.tercero_id, cc.canal_id, cc.moneda_id`,
     [movimientoId, usuarioId, medio, caja.id]
   );
   const s = apartada.rows[0];

@@ -13,6 +13,7 @@ import {
   guardarComprobanteTransferencia,
   urlComprobanteTransferencia,
   pagarConfirmacionPorOtroMetodo,
+  pagarParteConfirmacion,
   reactivarMovimientoCuentaCorriente,
   avisarClientePorWhatsApp,
   buscarMovimientoPorNumero,
@@ -541,6 +542,18 @@ cuentasCorrientesRouter.post("/movimientos/:id/mover", requireAuth, requireRole(
 });
 
 // Confirmaciones: pagar al cliente por otro método (no pasa a taquilla) desde una cuenta de la empresa
+// Confirmaciones: una parte se paga ya por una cuenta de la empresa y el resto queda para retirar en efectivo
+cuentasCorrientesRouter.post("/movimientos/:id/pagar-parte", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "id inválido" });
+    const d = z.object({ cajaId: z.number().int().positive(), monto: z.string().regex(/^\d+(\.\d+)?$/, "El monto no es un número válido") }).parse(req.body);
+    res.json(await pagarParteConfirmacion(id, d.cajaId, d.monto, req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
 cuentasCorrientesRouter.post("/movimientos/:id/pagar-otro-metodo", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
   try {
     const id = Number(req.params.id);

@@ -13,7 +13,7 @@ export async function obtenerDatosDelSistema() {
   );
   // confirmaciones que le debemos a clientes y todavía no se pagaron (ni en taquilla ni por otro método)
   const porPagar = await pool.query(
-    `SELECT m.codigo, sum(mc.monto) AS total, count(*)::int AS cantidad
+    `SELECT m.codigo, sum(mc.monto - mc.pagado_parcial) AS total, count(*)::int AS cantidad
      FROM movimientos_cuenta_corriente mc JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id JOIN monedas m ON m.id = cc.moneda_id
      WHERE cc.modulo = 'CAJA' AND mc.monto > 0 AND NOT mc.anulado AND mc.reverso_de_id IS NULL AND mc.pagado_en IS NULL
      GROUP BY m.codigo ORDER BY m.codigo`

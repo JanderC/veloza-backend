@@ -18,6 +18,7 @@ import { whatsappRouter } from "./whatsapp.routes";
 import { cuentasTerceroRouter } from "./cuentasTercero.routes";
 import { documentosTerceroRouter } from "./documentosTercero.routes";
 import { taquillaRouter } from "./taquilla.routes";
+import { taquillasRouter } from "./taquillas.routes";
 import { cajaFuerteRouter } from "./cajaFuerte.routes";
 import { capitalRouter } from "./capital.routes";
 
@@ -42,7 +43,8 @@ router.use("/metodos-pago", metodosPagoRouter);
 router.use("/usuarios", usuariosRouter);
 router.use("/whatsapp", whatsappRouter);
 router.use("/taquilla", taquillaRouter);
-router.use("/taquilla-2", taquillaRouter);
-router.use("/taquilla-3", taquillaRouter);
+// cualquier taquilla que se cree en Configuración: /taquilla-2, /taquilla-3, /taquilla-4…
+router.use(/^\/taquilla-\d+(?=\/|$)/, taquillaRouter);
+router.use("/taquillas", taquillasRouter);
 router.use("/caja-fuerte", cajaFuerteRouter);
 router.use("/capital", capitalRouter);

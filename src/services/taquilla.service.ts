@@ -26,8 +26,8 @@ function aDecimal(valor: string | undefined, campo: string) {
   }
 }
 
-// Hay varias taquillas (1, 2 y 3) que trabajan igual, cada una con su caja. Todo lo de este archivo corre
-// para la taquilla que eligió la ruta (/taquilla, /taquilla-2, /taquilla-3); sin contexto es la 1.
+// Hay varias taquillas que trabajan igual, cada una con su caja (se crean en Configuración). Todo lo de este archivo
+// corre para la taquilla que eligió la ruta (/taquilla, /taquilla-2, /taquilla-3…); sin contexto es la 1.
 const taquillaActual = new AsyncLocalStorage<number>();
 export function enTaquilla<T>(numero: number, fn: () => Promise<T>) {
   return taquillaActual.run(numero, fn);
@@ -35,8 +35,9 @@ export function enTaquilla<T>(numero: number, fn: () => Promise<T>) {
 
 async function cajaDeTaquilla() {
   const numero = taquillaActual.getStore() ?? 1;
-  const r = await pool.query(`SELECT id, nombre FROM cajas WHERE taquilla_numero = $1 AND activo`, [numero]);
+  const r = await pool.query(`SELECT id, nombre, activo FROM cajas WHERE taquilla_numero = $1`, [numero]);
   if (!r.rows[0]) throw errorHttp(`No hay una caja configurada para la taquilla ${numero}`, 409);
+  if (!r.rows[0].activo) throw errorHttp(`${r.rows[0].nombre} está deshabilitada: se habilita en Configuración › Taquillas`, 409);
   return r.rows[0] as { id: number; nombre: string };
 }
 

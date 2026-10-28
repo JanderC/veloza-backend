@@ -20,7 +20,7 @@ import {
   urlComprobanteOperacion,
 } from "../services/taquilla.service";
 
-// El mismo router atiende todas las taquillas: montado en /taquilla es la 1, en /taquilla-2 la 2, en /taquilla-3 la 3.
+// El mismo router atiende todas las taquillas: montado en /taquilla es la 1, en /taquilla-2 la 2, y así con las que se creen.
 export const taquillaRouter = Router();
 function t<T>(req: Request, fn: () => Promise<T>) {
   return enTaquilla(Number(/\/taquilla-(\d+)$/.exec(req.baseUrl)?.[1] ?? 1), fn);

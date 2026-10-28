@@ -14,7 +14,7 @@ export async function listarTaquillas() {
   const r = await pool.query(
     `SELECT c.taquilla_numero AS numero, c.nombre, c.activo, c.id AS caja_id,
             EXISTS (SELECT 1 FROM cierres_caja z WHERE z.caja_id = c.id AND z.estado = 'ABIERTA') AS abierta,
-            COALESCE((SELECT json_agg(json_build_object('codigo', m.codigo, 'monto', s.monto) ORDER BY m.id)
+            COALESCE((SELECT json_agg(json_build_object('codigo', m.codigo, 'monto', s.monto::text) ORDER BY m.id)
                       FROM saldos_caja s JOIN monedas m ON m.id = s.moneda_id WHERE s.caja_id = c.id AND s.monto <> 0), '[]') AS saldos
      FROM cajas c WHERE c.taquilla_numero IS NOT NULL ORDER BY c.taquilla_numero`
   );

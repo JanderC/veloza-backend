@@ -663,6 +663,8 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
      )
      SELECT c.id, c.fecha, c.descripcion, c.tipo, c.cantidad_base, c.tasa, c.tasa_es_porcentaje, c.comision_descontada, c.comision_incluida, c.estado_confirmacion, (c.comprobante_key IS NOT NULL) AS tiene_comprobante, c.pagado_en, c.cuenta_destino, c.monto, c.total, c.anulado, c.reverso_de_id,
             c.movimiento_caja_id, c.created_at, c.editado_en, ue.nombre AS editado_por_nombre, u.nombre AS usuario_nombre,
+            (SELECT e.antes FROM movimientos_cc_ediciones e WHERE e.movimiento_id = c.id ORDER BY e.id LIMIT 1) AS editado_original,
+            (SELECT count(*)::int FROM movimientos_cc_ediciones e WHERE e.movimiento_id = c.id) AS ediciones,
             (SELECT json_agg(json_build_object('id', t.id, 'orden', t.orden, 'referencia', t.referencia, 'remitente', t.remitente, 'cantidad', t.cantidad, 'formula', t.formula,
                                                'valor', t.valor, 'resultado', t.resultado, 'tiene_comprobante', t.comprobante_key IS NOT NULL) ORDER BY t.orden)
              FROM movimiento_transferencias t WHERE t.movimiento_id = c.id) AS transferencias,
@@ -923,7 +925,7 @@ export async function confirmarMovimiento(movimientoId: number, usuarioId?: numb
  */
 export async function editarMovimientoCuentaCorriente(
   movimientoId: number,
-  cambios: { descripcion?: string; fecha?: string; cuentaDestino?: string | null; cantidadBase?: string | null; tasa?: string | null; monto?: string },
+  cambios: { descripcion?: string; fecha?: string; cuentaDestino?: string | null; cantidadBase?: string | null; tasa?: string | null; tasaEsPorcentaje?: boolean; monto?: string },
   usuarioId: number
 ) {
   const client = await pool.connect();
@@ -965,14 +967,35 @@ export async function editarMovimientoCuentaCorriente(
     if (Number.isNaN(fecha.getTime())) throw errorHttp("La fecha no es válida", 400);
     if (fecha.getTime() > Date.now() + 5 * 60_000) throw errorHttp("La fecha no puede ser futura", 400);
     const cuentaDestino = cambios.cuentaDestino !== undefined ? cambios.cuentaDestino?.trim() || null : m.cuenta_destino;
+    // la tasa puede pasar a ser un % (97,5% se guarda 0.975 y multiplica) o volver a ser una tasa; una comisión descontada no cambia acá
+    if (cambios.tasaEsPorcentaje !== undefined && m.comision_descontada) throw errorHttp("Este movimiento se cargó con comisión descontada: el % no se cambia acá", 409);
+    const tasaEsPorcentaje = !tasa ? false : cambios.tasaEsPorcentaje ?? m.tasa_es_porcentaje;
 
     await client.query(
       `UPDATE movimientos_cuenta_corriente
        SET descripcion = $2, fecha = $3, cuenta_destino = $4, cantidad_base = $5, tasa = $6, monto = $7, saldo_nuevo = saldo_anterior + $7::numeric,
-           editado_en = now(), editado_por = $8
+           editado_en = now(), editado_por = $8, tasa_es_porcentaje = $9
        WHERE id = $1`,
-      [movimientoId, descripcion, fecha.toISOString(), cuentaDestino, cantidad ? cantidad.toFixed(8) : null, tasa ? tasa.toFixed(8) : null, monto.toFixed(4), usuarioId]
+      [movimientoId, descripcion, fecha.toISOString(), cuentaDestino, cantidad ? cantidad.toFixed(8) : null, tasa ? tasa.toFixed(8) : null, monto.toFixed(4), usuarioId, tasaEsPorcentaje]
     );
+    // auditoría: cómo estaba y cómo quedó
+    const foto = (x: { fecha: Date | string; descripcion: string | null; cuenta_destino: string | null; cantidad_base: unknown; tasa: unknown; tasa_es_porcentaje: boolean; monto: unknown }) => ({
+      fecha: new Date(x.fecha).toISOString(),
+      descripcion: x.descripcion,
+      cuenta_destino: x.cuenta_destino,
+      cantidad_base: x.cantidad_base == null ? null : String(x.cantidad_base),
+      tasa: x.tasa == null ? null : String(x.tasa),
+      tasa_es_porcentaje: !!x.tasa_es_porcentaje,
+      monto: String(x.monto),
+    });
+    await client.query(`INSERT INTO movimientos_cc_ediciones (movimiento_id, usuario_id, antes, despues) VALUES ($1, $2, $3, $4)`, [
+      movimientoId,
+      usuarioId,
+      JSON.stringify(foto(m)),
+      JSON.stringify(
+        foto({ fecha, descripcion, cuenta_destino: cuentaDestino, cantidad_base: cantidad ? cantidad.toFixed(8) : null, tasa: tasa ? tasa.toFixed(8) : null, tasa_es_porcentaje: tasaEsPorcentaje, monto: monto.toFixed(4) })
+      ),
+    ]);
     if (!delta.isZero()) {
       // el saldo corrido se guarda en el orden en que se cargaron: lo posterior se corre lo que cambió el monto
       await client.query(`UPDATE movimientos_cuenta_corriente SET saldo_anterior = saldo_anterior + $1, saldo_nuevo = saldo_nuevo + $1 WHERE cuenta_corriente_id = $2 AND id > $3`, [

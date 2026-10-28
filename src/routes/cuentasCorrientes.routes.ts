@@ -517,6 +517,7 @@ const editarMovimientoSchema = z.object({
   cuentaDestino: z.string().max(120).nullable().optional(),
   cantidadBase: z.string().nullable().optional(),
   tasa: z.string().nullable().optional(),
+  tasaEsPorcentaje: z.boolean().optional(),
   monto: z.string().optional(),
 });
 cuentasCorrientesRouter.put("/movimientos/:id", requireAuth, requireRole("ADMIN"), async (req, res, next) => {

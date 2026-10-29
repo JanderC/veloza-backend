@@ -6,6 +6,7 @@ export interface DatosComprobante {
   monto: string | null; // decimal normalizado: "1250000" o "403.5"
   moneda: string | null; // COP, USD, VES, EUR, USDT
   fecha: string | null; // AAAA-MM-DD
+  hora: string | null; // HH:MM, 24 horas (en Bancolombia arma la referencia junto con el comprobante y la fecha)
   banco: string | null;
   remitente: string | null; // quién envió
   destinatario: string | null; // a quién se le envió (en Zelle: "A", "Para", "Enviado a")
@@ -41,9 +42,22 @@ function normalizarMonto(v: unknown): string | null {
   return /[1-9]/.test(limpio) ? limpio : null;
 }
 
+/** "07:07 p. m.", "19:07" o "7:07 PM" -> "19:07". null si no es una hora. */
+function horaDe(t: string | null): string | null {
+  const m = t ? /(\d{1,2})[:.](\d{2})(?:[:.]\d{2})?\s*([ap])?/i.exec(t) : null;
+  if (!m) return null;
+  let h = Number(m[1]);
+  const pm = m[3]?.toLowerCase() === "p";
+  if (m[3] && h === 12) h = pm ? 12 : 0;
+  else if (pm) h += 12;
+  if (h > 23 || Number(m[2]) > 59) return null;
+  return `${String(h).padStart(2, "0")}:${m[2]}`;
+}
+
 /** Deja lo leído por la IA en el formato de siempre, descartando lo que no sirve. */
 function ordenar(datos: Record<string, unknown>): DatosComprobante {
   const fecha = texto(datos.fecha);
+  const hora = horaDe(texto(datos.hora));
   const moneda = texto(datos.moneda)?.toUpperCase() ?? null;
   const limpio = (v: unknown) => {
     const t = texto(v);
@@ -54,6 +68,7 @@ function ordenar(datos: Record<string, unknown>): DatosComprobante {
     monto: normalizarMonto(datos.monto),
     moneda: moneda && ["COP", "USD", "VES", "EUR", "USDT"].includes(moneda) ? moneda : null,
     fecha: fecha && /^\d{4}-\d{2}-\d{2}$/.test(fecha) && !Number.isNaN(Date.parse(fecha)) ? fecha : null,
+    hora,
     banco: limpio(datos.banco),
     remitente: limpio(datos.remitente),
     destinatario: limpio(datos.destinatario),
@@ -78,6 +93,7 @@ const INSTRUCCIONES = [
   '- "monto": el monto enviado tal como aparece, sin símbolo (ejemplos: "10.00", "1.250.000"). Si hay una comisión aparte, el monto es lo enviado, no el total con comisión.',
   '- "moneda": COP, USD, VES, EUR o USDT. Zelle siempre es USD.',
   '- "fecha": la fecha de la transacción en formato AAAA-MM-DD (no la hora que marca el teléfono).',
+  '- "hora": la hora de la transacción que dice el comprobante, en formato HH:MM de 24 horas ("07:07 p. m." es "19:07"); no la hora de la barra del teléfono.',
   '- "banco": el medio o banco: "Zelle", "Bancolombia", "Nequi", "Banco de Venezuela", "Western Union"... Si es una pantalla de Zelle dentro de la app de un banco, es "Zelle".',
   '- "remitente": el nombre de la PERSONA que envía el dinero, solo si aparece como tal ("De", "From", "Enviado por"). El nombre de una cuenta ("Adv SafeBalance Banking - 2839") no es una persona.',
   '- "destinatario": el nombre de la persona que recibe ("A", "Para", "To", "Enviado a", "Inscrito como").',
@@ -216,6 +232,7 @@ export async function leerComprobante(imagen: Buffer, mime: string): Promise<Dat
               monto: { type: "string", description: "Monto transferido, como aparece en la imagen" },
               moneda: { type: "string", description: "COP, USD, VES, EUR o USDT" },
               fecha: { type: "string", description: "Fecha de la transacción, AAAA-MM-DD" },
+              hora: { type: "string", description: "Hora de la transacción que dice el comprobante, HH:MM de 24 horas" },
               banco: { type: "string", description: "Banco o medio: Zelle, Bancolombia, Nequi, Banco de Venezuela..." },
               remitente: { type: "string", description: "Nombre de quien envía el dinero" },
               destinatario: { type: "string", description: "Nombre de quien recibe el dinero" },

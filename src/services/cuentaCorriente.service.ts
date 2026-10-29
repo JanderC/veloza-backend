@@ -730,10 +730,24 @@ export async function obtenerEstadoCuenta(id: number, filtros: { desde?: string;
      WHERE cuenta_corriente_id = $1 AND NOT anulado AND reverso_de_id IS NULL AND monto > 0 AND cantidad_base IS NOT NULL`,
     [id]
   );
+  // En Confirmaciones: todo lo que el cliente tiene por retirar en taquilla (de cualquier día), para avisarle junto
+  const porPagar =
+    cuenta.modulo === "CAJA"
+      ? (
+          await pool.query(
+            `SELECT id, fecha, descripcion, (monto - pagado_parcial)::text AS monto, estado_confirmacion
+             FROM movimientos_cuenta_corriente
+             WHERE cuenta_corriente_id = $1 AND NOT anulado AND reverso_de_id IS NULL AND monto > 0 AND pagado_en IS NULL
+             ORDER BY fecha, id`,
+            [id]
+          )
+        ).rows
+      : [];
   return {
     cuenta,
     cierre,
     cierres,
+    porPagar,
     enviado: enviado.toFixed(4),
     enviadoTotal: new Decimal(envios.rows[0].total).toFixed(4),
     enviadoPorPagar: new Decimal(envios.rows[0].por_pagar).toFixed(4),

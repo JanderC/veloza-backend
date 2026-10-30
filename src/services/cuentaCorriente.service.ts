@@ -375,10 +375,10 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
   ]);
   // Confirmaciones, cliente que ya existía: el cliente es uno solo aunque cambie de medio. Si ya tiene una cuenta de
   // Confirmaciones en esa moneda (con el medio que sea), el movimiento va a esa: el medio lo lleva cada movimiento.
-  if (input.modulo === "CAJA" && input.usarExistente) {
+  if ((input.modulo === "CAJA" || input.modulo === "POR_PAGAR") && input.usarExistente) {
     const suya = await pool.query(
-      `SELECT id, activo FROM cuentas_corrientes WHERE tercero_id = $1 AND modulo = 'CAJA' AND moneda_id = $2 ORDER BY activo DESC, (canal_id = $3) DESC, id LIMIT 1`,
-      [terceroId, input.monedaId, canalId]
+      `SELECT id, activo FROM cuentas_corrientes WHERE tercero_id = $1 AND modulo = $4 AND moneda_id = $2 ORDER BY activo DESC, (canal_id = $3) DESC, id LIMIT 1`,
+      [terceroId, input.monedaId, canalId, input.modulo]
     );
     if (suya.rows[0]) {
       if (!suya.rows[0].activo) await pool.query(`UPDATE cuentas_corrientes SET activo = true WHERE id = $1`, [suya.rows[0].id]);
@@ -1318,7 +1318,7 @@ export async function buscarClientesExistentes(nombre: string, telefono: string)
  */
 export async function enviarAConfirmaciones(
   cuentaId: number,
-  d: { monto: string; formula: "DIRECTO" | "COMISION" | "TASA" | "DIVIDIR"; valor?: string; monedaEntregaId: number; canalId: number; descripcion?: string },
+  d: { monto: string; formula: "DIRECTO" | "COMISION" | "TASA" | "DIVIDIR"; valor?: string; incluida?: boolean; monedaEntregaId: number; canalId: number; descripcion?: string },
   usuarioId: number
 ) {
   const origen = (
@@ -1344,7 +1344,9 @@ export async function enviarAConfirmaciones(
   if (d.formula === "COMISION" && valor!.gte(100)) throw errorHttp("La comisión tiene que ser menor al 100%", 400);
 
   // lo que queda para el cliente, en la moneda en que se le entrega
-  const factor = d.formula === "COMISION" ? new Decimal(1).minus(valor!.div(100)) : null;
+  // comisión ya sumada en lo enviado: 2.650 ÷ 1,06 = 2.500
+  const incluida = d.formula === "COMISION" && !!d.incluida;
+  const factor = d.formula === "COMISION" ? (incluida ? new Decimal(1).div(new Decimal(1).plus(valor!.div(100))) : new Decimal(1).minus(valor!.div(100))) : null;
   const resultado = (
     d.formula === "TASA" ? monto.times(valor!) : d.formula === "DIVIDIR" ? monto.div(valor!) : d.formula === "COMISION" ? monto.times(factor!) : monto
   ).toDecimalPlaces(decimales, Decimal.ROUND_HALF_UP);
@@ -1352,7 +1354,7 @@ export async function enviarAConfirmaciones(
   const fmt = (v: Decimal) => v.toNumber().toLocaleString("es-CO", { maximumFractionDigits: 4 });
   const detalle =
     d.formula === "COMISION"
-      ? `${fmt(monto)} ${origen.codigo} − ${fmt(valor!)}%`
+      ? `${fmt(monto)} ${origen.codigo} ${incluida ? "÷ 1 +" : "−"} ${fmt(valor!)}%`
       : d.formula === "TASA"
         ? `${fmt(monto)} ${origen.codigo} × ${fmt(valor!)}`
         : d.formula === "DIVIDIR"
@@ -1376,7 +1378,7 @@ export async function enviarAConfirmaciones(
     ...(d.formula === "TASA"
       ? { cantidadBase: monto.toString(), tasa: valor!.toString() }
       : d.formula === "COMISION"
-        ? { cantidadBase: monto.toString(), tasa: factor!.toString(), tasaEsPorcentaje: true, comisionDescontada: true, comisionIncluida: false }
+        ? { cantidadBase: monto.toString(), tasa: factor!.toDecimalPlaces(10).toString(), tasaEsPorcentaje: true, comisionDescontada: true, comisionIncluida: incluida }
         : { monto: resultado.toFixed(decimales) }),
   } as RegistrarMovimientoCCInput);
   try {

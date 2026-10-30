@@ -132,6 +132,7 @@ cuentasCorrientesRouter.post("/:id/enviar-a-confirmaciones", requireAuth, requir
         monto: z.string(),
         formula: z.enum(["DIRECTO", "COMISION", "TASA", "DIVIDIR"]),
         valor: z.string().optional(),
+        incluida: z.boolean().optional(),
         monedaEntregaId: z.number().int().positive(),
         canalId: z.number().int().positive(),
         descripcion: z.string().max(200).optional(),

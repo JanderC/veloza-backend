@@ -115,6 +115,7 @@ cuentasCorrientesRouter.get("/", requireAuth, async (req, res, next) => {
         terceroId: entero(req.query.terceroId),
         canalId: entero(req.query.canalId),
         buscar: typeof req.query.buscar === "string" ? req.query.buscar : undefined,
+        soloCliente: req.query.soloCliente === "1",
         tipoTercero: tipo,
         vista: req.query.vista === "corrientes" || req.query.vista === "cobrar" || req.query.vista === "pagar" || req.query.vista === "cajas" ? req.query.vista : undefined,
       })

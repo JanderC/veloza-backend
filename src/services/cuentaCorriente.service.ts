@@ -611,6 +611,8 @@ export async function listarCuentasCorrientes(filtros: {
   terceroId?: number;
   canalId?: number;
   buscar?: string;
+  // true: busca solo en los datos del cliente (nombre, teléfono, cédula), no en las referencias de sus movimientos
+  soloCliente?: boolean;
   tipoTercero?: string;
   // corrientes: las que se llevan en Cuentas Corrientes. cobrar: las pasadas a Cuentas por Cobrar + toda cuenta con saldo (me deben o yo debo)
   vista?: "corrientes" | "cobrar" | "pagar" | "cajas";
@@ -641,10 +643,11 @@ export async function listarCuentasCorrientes(filtros: {
     valores.push(`%${texto}%`);
     // ...o por referencia: la del cliente, o la anotada en alguno de sus movimientos (número de transferencia, MTCN, quién envió)
     const porReferencia =
-      texto.length >= 3
+      texto.length >= 3 && !filtros.soloCliente
         ? ` OR cc.referencia ILIKE $${valores.length} OR EXISTS (SELECT 1 FROM movimientos_cuenta_corriente mr WHERE mr.cuenta_corriente_id = cc.id AND NOT mr.anulado AND ${COINCIDE_MOVIMIENTO("mr", `$${valores.length}`)})`
         : "";
-    const porTexto = `(t.nombre ILIKE $${valores.length} OR t.identificacion ILIKE $${valores.length}${porReferencia})`;
+    // el nombre sin importar tildes: "Hernandez" encuentra a "Hernández"
+    const porTexto = `(t.nombre ILIKE $${valores.length} OR ${normalizarSql("t.nombre")} LIKE ${normalizarSql(`$${valores.length}`)} OR t.identificacion ILIKE $${valores.length}${porReferencia})`;
     const digitos = texto.replace(/\D/g, "");
     if (digitos.length >= 3) {
       valores.push(`%${digitos}%`);
@@ -657,7 +660,7 @@ export async function listarCuentasCorrientes(filtros: {
   // Si se buscó algo, a cada cuenta se le dice en qué movimiento apareció (para no confundir dos clientes con la misma referencia)
   const buscado = filtros.buscar?.trim() ?? "";
   let filas = r.rows;
-  if (buscado.length >= 3 && filas.length) {
+  if (buscado.length >= 3 && filas.length && !filtros.soloCliente) {
     const m = await pool.query(
       `SELECT DISTINCT ON (mv.cuenta_corriente_id) mv.cuenta_corriente_id, mv.id, mv.descripcion, mv.fecha, mv.monto,
               count(*) OVER (PARTITION BY mv.cuenta_corriente_id) AS cuantos

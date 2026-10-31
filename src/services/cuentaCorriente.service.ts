@@ -573,6 +573,20 @@ export async function buscarOperacionIgual(canalId: number, montos: string[], cu
   return r.rows[0] ?? null;
 }
 
+/** Confirmaciones: los últimos movimientos del cliente, juntos, sin importar el medio ni la moneda. */
+export async function ultimosMovimientosCliente(terceroId: number) {
+  const r = await pool.query(
+    `SELECT mc.id, mc.cuenta_corriente_id AS cuenta_id, mc.fecha, mc.descripcion, mc.tipo, mc.monto, mo.codigo AS moneda_codigo
+     FROM movimientos_cuenta_corriente mc
+     JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+     JOIN monedas mo ON mo.id = cc.moneda_id
+     WHERE cc.tercero_id = $1 AND cc.modulo = 'CAJA' AND NOT mc.anulado AND mc.reverso_de_id IS NULL
+     ORDER BY mc.fecha DESC, mc.id DESC LIMIT 12`,
+    [terceroId]
+  );
+  return r.rows;
+}
+
 /** Pasar una cuenta a Cuentas por Cobrar (sale de la lista de Cuentas Corrientes) o devolverla. No toca saldo ni movimientos. */
 export async function cambiarModuloCuentaCorriente(id: number, modulo: ModuloCuenta) {
   const r = await pool.query(`UPDATE cuentas_corrientes SET modulo = $1 WHERE id = $2 RETURNING id`, [modulo, id]);

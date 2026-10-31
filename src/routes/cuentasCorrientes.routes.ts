@@ -18,6 +18,7 @@ import {
   avisarClientePorWhatsApp,
   buscarMovimientoPorNumero,
   buscarOperacionIgual,
+  ultimosMovimientosCliente,
   cambiarEstadoCuentaCorriente,
   cambiarGrupoCobro,
   cambiarModuloCuentaCorriente,
@@ -342,6 +343,16 @@ cuentasCorrientesRouter.post("/movimientos/:id/confirmar", requireAuth, requireR
     const id = entero(req.params.id);
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     res.json(await confirmarMovimiento(id, req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Confirmaciones: los últimos movimientos del cliente, de todas sus cuentas
+cuentasCorrientesRouter.get("/cliente/:terceroId/ultimos", requireAuth, async (req, res, next) => {
+  try {
+    const terceroId = z.coerce.number().int().positive().parse(req.params.terceroId);
+    res.json(await ultimosMovimientosCliente(terceroId));
   } catch (err) {
     next(err);
   }

@@ -17,6 +17,7 @@ import {
   reactivarMovimientoCuentaCorriente,
   avisarClientePorWhatsApp,
   buscarMovimientoPorNumero,
+  buscarOperacionIgual,
   cambiarEstadoCuentaCorriente,
   cambiarGrupoCobro,
   cambiarModuloCuentaCorriente,
@@ -341,6 +342,16 @@ cuentasCorrientesRouter.post("/movimientos/:id/confirmar", requireAuth, requireR
     const id = entero(req.params.id);
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     res.json(await confirmarMovimiento(id, req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ¿Ya hay una operación igual por ese medio, en cualquier cliente? (Zelle no trae número de transferencia)
+cuentasCorrientesRouter.get("/movimientos/operacion-igual", requireAuth, async (req, res, next) => {
+  try {
+    const q = z.object({ canalId: z.coerce.number().int().positive(), montos: z.string().regex(/^[0-9.]+(,[0-9.]+){0,3}$/) }).parse(req.query);
+    res.json({ movimiento: await buscarOperacionIgual(q.canalId, q.montos.split(","), entero(req.query.cuentaId)) });
   } catch (err) {
     next(err);
   }

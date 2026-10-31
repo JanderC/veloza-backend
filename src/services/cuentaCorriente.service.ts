@@ -549,6 +549,29 @@ export async function buscarMovimientoPorNumero(numero: string, canalId?: number
   return r.rows[0] ?? null;
 }
 
+/**
+ * Zelle no trae número de referencia: el mismo capture puede entrar dos veces con nombres distintos ("Nohely" y
+ * "Nohely Mora"). Busca en Confirmaciones, en cualquier cliente, una operación de las últimas 24 horas por ese medio
+ * y con el mismo monto. Dos envíos iguales también pasan: la pantalla avisa y quien registra decide.
+ */
+export async function buscarOperacionIgual(canalId: number, montos: string[], cuentaId?: number) {
+  const r = await pool.query(
+    `SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, t.nombre AS tercero_nombre, ch.nombre AS canal_nombre
+     FROM movimientos_cuenta_corriente mc
+     JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+     JOIN canales_cuenta_corriente ch ON ch.id = COALESCE(mc.canal_id, cc.canal_id)
+     JOIN terceros t ON t.id = cc.tercero_id
+     WHERE NOT mc.anulado AND mc.reverso_de_id IS NULL AND mc.monto > 0 AND cc.modulo = 'CAJA'
+       AND COALESCE(mc.canal_id, cc.canal_id) = $1
+       AND (mc.monto = ANY($2::numeric[]) OR mc.cantidad_base = ANY($2::numeric[]))
+       AND mc.created_at > now() - interval '24 hours'
+       AND ($3::int IS NULL OR cc.id <> $3)
+     ORDER BY mc.id DESC LIMIT 1`,
+    [canalId, montos, cuentaId ?? null]
+  );
+  return r.rows[0] ?? null;
+}
+
 /** Pasar una cuenta a Cuentas por Cobrar (sale de la lista de Cuentas Corrientes) o devolverla. No toca saldo ni movimientos. */
 export async function cambiarModuloCuentaCorriente(id: number, modulo: ModuloCuenta) {
   const r = await pool.query(`UPDATE cuentas_corrientes SET modulo = $1 WHERE id = $2 RETURNING id`, [modulo, id]);

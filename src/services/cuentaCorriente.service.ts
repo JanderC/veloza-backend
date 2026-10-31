@@ -351,16 +351,19 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
   const canalId = input.canalId ?? ((await crearCanal(CANAL_SIN_BANCO)).id as number);
   const cobro = validarCobro(input.monedaId, input.monedaCobroId ?? null, input.tasaCobro);
   let terceroId = input.terceroId;
+  let usarExistente = input.usarExistente;
   if (!terceroId) {
     const n = input.nuevoTercero;
     if (!n?.nombre.trim()) throw errorHttp("Elegí un tercero o escribí el nombre del nuevo", 400);
     // El cliente es uno solo para todos los módulos: el mismo nombre no se crea dos veces (ni en otro módulo)
-    // ...y el teléfono identifica al cliente: otro cliente no puede tener ese número
+    // ...y el teléfono identifica al cliente: con ese número es él, esté en el módulo que esté. No se pregunta ni se
+    // crea otro: se usa ese cliente y se le abre su cuenta aquí.
     const delTelefono = await clienteConTelefono(n.telefono);
+    if (delTelefono) usarExistente = true;
     const repetido = delTelefono
       ? { rows: [delTelefono] }
       : await pool.query(`SELECT id FROM terceros WHERE ${NOMBRE_NORMALIZADO} = ${normalizarSql("$1")} AND activo ORDER BY id LIMIT 1`, [n.nombre.trim()]);
-    if (repetido.rows[0] && input.usarExistente) {
+    if (repetido.rows[0] && usarExistente) {
       // es el mismo cliente (ya se preguntó en la pantalla). Se le completan el teléfono y la cédula si faltaban.
       terceroId = repetido.rows[0].id as number;
       await pool.query(`UPDATE terceros SET telefono = COALESCE(NULLIF(telefono, ''), $1), identificacion = COALESCE(NULLIF(identificacion, ''), $2) WHERE id = $3`, [
@@ -368,8 +371,6 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
         n.identificacion?.trim() || null,
         terceroId,
       ]);
-    } else if (delTelefono) {
-      throw errorHttp(`Ya existe "${delTelefono.nombre}" con ese teléfono: un número es de un solo cliente`, 409);
     } else if (repetido.rows[0]) {
       throw errorHttp(`Ya existe "${n.nombre.trim()}" en el sistema: usá ese cliente en vez de crearlo de nuevo`, 409);
     } else {
@@ -392,7 +393,7 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
   ]);
   // Confirmaciones, cliente que ya existía: el cliente es uno solo aunque cambie de medio. Si ya tiene una cuenta de
   // Confirmaciones en esa moneda (con el medio que sea), el movimiento va a esa: el medio lo lleva cada movimiento.
-  if ((input.modulo === "CAJA" || input.modulo === "POR_PAGAR") && input.usarExistente) {
+  if ((input.modulo === "CAJA" || input.modulo === "POR_PAGAR") && usarExistente) {
     const suya = await pool.query(
       `SELECT id, activo FROM cuentas_corrientes WHERE tercero_id = $1 AND modulo = $4 AND moneda_id = $2 ORDER BY activo DESC, (canal_id = $3) DESC, id LIMIT 1`,
       [terceroId, input.monedaId, canalId, input.modulo]
@@ -402,7 +403,7 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
       return obtenerCuentaCorriente(suya.rows[0].id);
     }
   }
-  if (existe.rows[0] && input.usarExistente) {
+  if (existe.rows[0] && usarExistente) {
     if (!existe.rows[0].activo) await pool.query(`UPDATE cuentas_corrientes SET activo = true WHERE id = $1`, [existe.rows[0].id]);
     return obtenerCuentaCorriente(existe.rows[0].id);
   }
@@ -1343,8 +1344,10 @@ export async function buscarClientesExistentes(nombre: string, telefono: string)
             COALESCE((SELECT array_agg(DISTINCT cc.modulo) FROM cuentas_corrientes cc WHERE cc.tercero_id = t.id AND cc.activo), '{}') AS modulos
      FROM terceros t
      WHERE t.activo AND ((length($1) >= 3 AND ${normalizarSql("t.nombre")} = ${normalizarSql("$1")})
-        OR (length($2) >= 7 AND right(regexp_replace(coalesce(t.telefono, ''), '\\D', '', 'g'), 10) = $2))
-     ORDER BY 6 DESC, t.id LIMIT 5`,
+        OR (length($2) >= 7 AND right(regexp_replace(coalesce(t.telefono, ''), '\\D', '', 'g'), 10) = $2)
+        -- nombre parecido: uno es el otro con más apellidos ("Darguin" y "Darguin Rojas")
+        OR (length($1) >= 4 AND (${normalizarSql("t.nombre")} LIKE ${normalizarSql("$1")} || ' %' OR ${normalizarSql("$1")} LIKE ${normalizarSql("t.nombre")} || ' %')))
+     ORDER BY 7 DESC, 6 DESC, t.id LIMIT 5`,
     [nom, digitos]
   );
   return r.rows as { id: number; nombre: string; telefono: string | null; identificacion: string | null; tipo: string; mismo_nombre: boolean; mismo_telefono: boolean; modulos: string[] }[];

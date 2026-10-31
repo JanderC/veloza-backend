@@ -4,6 +4,7 @@ import { pool } from "../../db/pool";
 import { obtenerCotizacionesVigentes } from "../cotizacionesDetalle.service";
 import { calcularCambio, registrarCambioDivisa } from "../transaccionService";
 import { crearCuentaTercero, type DatosCuentaTercero } from "../cuentasTercero.service";
+import { clienteConTelefono } from "../cuentaCorriente.service";
 import type { ConfigWa } from "./config";
 import type { HerramientaIA } from "./ia";
 import { guardarEstadoConversacion, notaInterna, type EstadoConversacion } from "./mensajes";
@@ -396,6 +397,15 @@ async function registrarCliente(ctx: ContextoBot, args: Record<string, unknown>)
     if (ctx.simulacion) ctx.efectos.push(`Vincularía el chat con el cliente #${otro.id}`);
     else await pool.query(`UPDATE wa_chats SET tercero_id = $1 WHERE jid = $2`, [otro.id, ctx.jid]);
     ctx.terceroId = otro.id;
+    return { registrado: true, ya_existia: true };
+  }
+
+  // el teléfono identifica al cliente: si ese número ya está, el chat se vincula con él
+  const delTelefono = await clienteConTelefono(ctx.telefono);
+  if (delTelefono) {
+    if (ctx.simulacion) ctx.efectos.push(`Vincularía el chat con el cliente #${delTelefono.id}`);
+    else await pool.query(`UPDATE wa_chats SET tercero_id = $1 WHERE jid = $2`, [delTelefono.id, ctx.jid]);
+    ctx.terceroId = delTelefono.id;
     return { registrado: true, ya_existia: true };
   }
 

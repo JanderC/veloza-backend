@@ -3,6 +3,7 @@ import { z } from "zod";
 import { pool } from "../db/pool";
 import { requireAuth, requireRole } from "../middleware/auth";
 import { obtenerResumenTercero } from "../services/terceroResumen.service";
+import { clienteConTelefono } from "../services/cuentaCorriente.service";
 
 export const tercerosRouter = Router();
 
@@ -16,6 +17,8 @@ const crearTerceroSchema = z.object({
 tercerosRouter.post("/", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
   try {
     const data = crearTerceroSchema.parse(req.body);
+    const dueno = await clienteConTelefono(data.telefono);
+    if (dueno) return res.status(409).json({ error: `Ese teléfono ya es de "${dueno.nombre}": un número es de un solo cliente` });
     const result = await pool.query(
       `INSERT INTO terceros (nombre, identificacion, telefono, tipo)
        VALUES ($1, $2, $3, $4)
@@ -99,6 +102,12 @@ tercerosRouter.put("/:id", requireAuth, requireRole("ADMIN", "ASESOR"), async (r
     if (!tercero) return res.status(404).json({ error: "Tercero no encontrado" });
 
     const data = actualizarTerceroSchema.parse(req.body);
+    // solo si cambió el número: así se le puede corregir el nombre a un cliente que todavía comparte teléfono
+    const soloDigitos = (t: string | null | undefined) => (t ?? "").replace(/\D/g, "").slice(-10);
+    if (data.telefono !== undefined && soloDigitos(data.telefono) !== soloDigitos(tercero.telefono)) {
+      const dueno = await clienteConTelefono(data.telefono, id);
+      if (dueno) return res.status(409).json({ error: `Ese teléfono ya es de "${dueno.nombre}": un número es de un solo cliente` });
+    }
     const result = await pool.query(
       `UPDATE terceros SET nombre = $1, identificacion = $2, telefono = $3, tipo = $4 WHERE id = $5 RETURNING *`,
       [

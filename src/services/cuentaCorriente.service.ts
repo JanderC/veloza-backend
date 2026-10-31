@@ -316,6 +316,17 @@ interface CrearCuentaInput {
   usuarioId: number;
 }
 
+/** El teléfono identifica al cliente: el que ya tiene ese número (los últimos 10 dígitos), sin contar a "excluirId". */
+export async function clienteConTelefono(telefono: string | null | undefined, excluirId?: number) {
+  const digitos = (telefono ?? "").replace(/\D/g, "").slice(-10);
+  if (digitos.length < 7) return null;
+  const r = await pool.query(
+    `SELECT id, nombre FROM terceros WHERE activo AND right(regexp_replace(coalesce(telefono, ''), '\\D', '', 'g'), 10) = $1 AND id <> $2 ORDER BY id LIMIT 1`,
+    [digitos, excluirId ?? 0]
+  );
+  return (r.rows[0] as { id: number; nombre: string } | undefined) ?? null;
+}
+
 export const CANAL_SIN_BANCO = "SIN_BANCO";
 export type ModuloCuenta = "CORRIENTE" | "POR_COBRAR" | "POR_PAGAR" | "CAJA";
 
@@ -344,7 +355,11 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
     const n = input.nuevoTercero;
     if (!n?.nombre.trim()) throw errorHttp("Elegí un tercero o escribí el nombre del nuevo", 400);
     // El cliente es uno solo para todos los módulos: el mismo nombre no se crea dos veces (ni en otro módulo)
-    const repetido = await pool.query(`SELECT id FROM terceros WHERE ${NOMBRE_NORMALIZADO} = ${normalizarSql("$1")} AND activo ORDER BY id LIMIT 1`, [n.nombre.trim()]);
+    // ...y el teléfono identifica al cliente: otro cliente no puede tener ese número
+    const delTelefono = await clienteConTelefono(n.telefono);
+    const repetido = delTelefono
+      ? { rows: [delTelefono] }
+      : await pool.query(`SELECT id FROM terceros WHERE ${NOMBRE_NORMALIZADO} = ${normalizarSql("$1")} AND activo ORDER BY id LIMIT 1`, [n.nombre.trim()]);
     if (repetido.rows[0] && input.usarExistente) {
       // es el mismo cliente (ya se preguntó en la pantalla). Se le completan el teléfono y la cédula si faltaban.
       terceroId = repetido.rows[0].id as number;
@@ -353,6 +368,8 @@ export async function crearCuentaCorriente(input: CrearCuentaInput) {
         n.identificacion?.trim() || null,
         terceroId,
       ]);
+    } else if (delTelefono) {
+      throw errorHttp(`Ya existe "${delTelefono.nombre}" con ese teléfono: un número es de un solo cliente`, 409);
     } else if (repetido.rows[0]) {
       throw errorHttp(`Ya existe "${n.nombre.trim()}" en el sistema: usá ese cliente en vez de crearlo de nuevo`, 409);
     } else {

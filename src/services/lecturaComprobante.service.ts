@@ -106,7 +106,7 @@ const INSTRUCCIONES = [
   '  "REMITLY": envío por Remitly (número de referencia que empieza con R, montos en USD y COP, "Remitly");',
   '  "WESTERN_BANCOLOMBIA": envío de Western Union a una cuenta Bancolombia desde la app ("Número de envío", "Importe enviado", "obtiene ... COP");',
   '  "WESTERN_TAQUILLA": pago de giro Western Union en ventanilla (formulario con "Código del Giro (MTCN)", Banco Unión, declaración de cambio);',
-  '  "PAGO_FACTURA": recibo de pago de una factura o servicio (Efecty, "Orden de servicio", "Valor recibido");',
+  '  "PAGO_FACTURA": recibo de pago de una factura o servicio (Efecty, "Orden de servicio", "Valor recibido"), también si se pagó desde Bancolombia (en ese caso "banco" es Bancolombia);',
   '  "BANCOLOMBIA_INTERNACIONAL": transferencia internacional a Bancolombia (correo con "Total al destinatario COP", "ID de transferencia").',
 ].join("\n");
 

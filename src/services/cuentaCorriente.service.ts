@@ -526,28 +526,63 @@ export async function eliminarCuentaCorriente(id: number) {
   if (!r.rows[0]) throw errorHttp("Cuenta corriente no encontrada", 404);
 }
 
+// Lo que se muestra de un movimiento parecido para comparar los captures
+const CAMPOS_PARECIDO = `t.nombre AS tercero_nombre, ch.nombre AS canal_nombre, mo.codigo AS moneda_codigo, u.nombre AS registrado_por`;
+
 /**
- * ¿Ya hay un movimiento con ese número de transferencia? Se busca en lo anotado después de la referencia
- * ("Abono Zelle · Juan 123456" o "Recibe Zelle · d1a1kat6i"), en todas las cuentas, sin contar los anulados.
- * La referencia puede tener letras: se compara completa, sin distinguir mayúsculas.
+ * Los movimientos con una referencia igual o parecida, en el medio indicado (la misma referencia puede estar en
+ * Bancolombia y en Nequi). Se compara sin guiones, sin ceros a la izquierda y por partes: "0000084200" encuentra
+ * "0000084200a", y "0000000712" encuentra lo que quedó guardado como "00712-281026-1907".
+ * bloquea: es exacta y el medio no repite números. Bancolombia numera los comprobantes por cuenta: el mismo número puede
+ * ser de otra transferencia, y por eso ahí se comparan los captures y decide quien registra.
  */
-export async function buscarMovimientoPorNumero(numero: string, canalId?: number) {
-  // El bloqueo es por medio de pago: la misma referencia puede existir en Bancolombia y en Nequi (cada banco numera
-  // por su cuenta), pero no dos veces en el mismo medio. Sin canal se busca en todos.
+export async function buscarCapturasParecidas(numero: string, canalId?: number) {
+  const limpio = numero.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+  if (limpio.length < 4) return [];
   const r = await pool.query(
-    `SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, t.nombre AS tercero_nombre, ch.nombre AS canal_nombre
-     FROM movimientos_cuenta_corriente mc
-     JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
-     -- el medio es el del movimiento; los anteriores a ese dato usan el de la cuenta
-     JOIN canales_cuenta_corriente ch ON ch.id = COALESCE(mc.canal_id, cc.canal_id)
-     JOIN terceros t ON t.id = cc.tercero_id
-     WHERE NOT mc.anulado AND position(' · ' in mc.descripcion) > 0
-       AND ($2::int IS NULL OR COALESCE(mc.canal_id, cc.canal_id) = $2)
-       AND regexp_replace(split_part(mc.descripcion, ' · ', 2), ' \([0-9.,]+ [A-Z]{3,5} a [0-9.,]+\)$', '') ~* ('(^|[^a-z0-9])' || $1 || '([^a-z0-9]|$)')
-     ORDER BY mc.id DESC LIMIT 1`,
-    [numero, canalId ?? null]
+    `WITH base AS (
+       SELECT mc.id, NULL::int AS transferencia_id, mc.fecha, mc.descripcion, mc.monto, mc.usuario_id,
+              regexp_replace(split_part(mc.descripcion, ' · ', 2), ' \([0-9.,]+ [A-Z]{3,5} a [0-9.,]+\)$', '') AS referencia,
+              mc.comprobante_key IS NOT NULL AS tiene_comprobante, cc.tercero_id, cc.moneda_id, COALESCE(mc.canal_id, cc.canal_id) AS canal_id
+       FROM movimientos_cuenta_corriente mc
+       JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+       -- el pago de una confirmación lleva la misma referencia: lo que se compara es la operación
+       WHERE NOT mc.anulado AND mc.reverso_de_id IS NULL AND position(' · ' in mc.descripcion) > 0 AND mc.pago_parcial_de_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM movimientos_cuenta_corriente p WHERE p.pagado_movimiento_id = mc.id)
+       UNION ALL
+       SELECT mc.id, tr.id, mc.fecha, mc.descripcion, tr.resultado, mc.usuario_id, tr.referencia,
+              tr.comprobante_key IS NOT NULL, cc.tercero_id, cc.moneda_id, COALESCE(mc.canal_id, cc.canal_id)
+       FROM movimiento_transferencias tr
+       JOIN movimientos_cuenta_corriente mc ON mc.id = tr.movimiento_id
+       JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
+       WHERE NOT mc.anulado AND mc.reverso_de_id IS NULL AND tr.referencia IS NOT NULL
+     ), palabras AS (
+       SELECT b.*, p AS palabra, lower(regexp_replace(p, '[^A-Za-z0-9]', '', 'g')) AS clave
+       FROM base b, regexp_split_to_table(b.referencia, '[[:space:]/,;]+') AS p
+       WHERE $2::int IS NULL OR b.canal_id = $2
+     ), hallados AS (
+       SELECT DISTINCT ON (w.id, COALESCE(w.transferencia_id, 0)) w.*, (w.clave = $1 OR ltrim(w.clave, '0') = ltrim($1, '0')) AS exacta
+       FROM palabras w
+       WHERE w.clave ~ '[0-9]' AND (
+         w.clave = $1 OR ltrim(w.clave, '0') = ltrim($1, '0')
+         OR (length($1) >= 6 AND position($1 in w.clave) > 0)
+         OR (length(w.clave) >= 6 AND position(w.clave in $1) > 0)
+         -- la referencia vieja de Bancolombia: últimos 5 del comprobante, fecha y hora
+         OR ($1 ~ '^[0-9]+$' AND w.palabra ~ '^[0-9]{5}-[0-9]{6}' AND split_part(w.palabra, '-', 1) = right($1, 5))
+       )
+       ORDER BY w.id, COALESCE(w.transferencia_id, 0), (w.clave = $1) DESC
+     )
+     SELECT h.id, h.transferencia_id, h.fecha, h.descripcion, h.monto, h.referencia, h.tiene_comprobante, h.exacta,
+            (h.exacta AND ch.nombre <> 'BANCOLOMBIA') AS bloquea, ${CAMPOS_PARECIDO}
+     FROM hallados h
+     JOIN terceros t ON t.id = h.tercero_id
+     JOIN canales_cuenta_corriente ch ON ch.id = h.canal_id
+     JOIN monedas mo ON mo.id = h.moneda_id
+     LEFT JOIN usuarios u ON u.id = h.usuario_id
+     ORDER BY h.exacta DESC, h.fecha DESC LIMIT 4`,
+    [limpio, canalId ?? null]
   );
-  return r.rows[0] ?? null;
+  return r.rows;
 }
 
 /**
@@ -557,11 +592,14 @@ export async function buscarMovimientoPorNumero(numero: string, canalId?: number
  */
 export async function buscarOperacionIgual(canalId: number, montos: string[], cuentaId?: number) {
   const r = await pool.query(
-    `SELECT mc.id, mc.fecha, mc.descripcion, mc.monto, t.nombre AS tercero_nombre, ch.nombre AS canal_nombre
+    `SELECT mc.id, NULL::int AS transferencia_id, mc.fecha, mc.descripcion, mc.monto, '' AS referencia, mc.comprobante_key IS NOT NULL AS tiene_comprobante,
+            false AS exacta, false AS bloquea, ${CAMPOS_PARECIDO}
      FROM movimientos_cuenta_corriente mc
      JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
      JOIN canales_cuenta_corriente ch ON ch.id = COALESCE(mc.canal_id, cc.canal_id)
      JOIN terceros t ON t.id = cc.tercero_id
+     JOIN monedas mo ON mo.id = cc.moneda_id
+     LEFT JOIN usuarios u ON u.id = mc.usuario_id
      WHERE NOT mc.anulado AND mc.reverso_de_id IS NULL AND mc.monto > 0 AND cc.modulo = 'CAJA'
        AND COALESCE(mc.canal_id, cc.canal_id) = $1
        AND (mc.monto = ANY($2::numeric[]) OR mc.cantidad_base = ANY($2::numeric[]))

@@ -6,7 +6,7 @@ export interface DatosComprobante {
   monto: string | null; // decimal normalizado: "1250000" o "403.5"
   moneda: string | null; // COP, USD, VES, EUR, USDT
   fecha: string | null; // AAAA-MM-DD
-  hora: string | null; // HH:MM, 24 horas (en Bancolombia arma la referencia junto con el comprobante y la fecha)
+  hora: string | null; // HH:MM, 24 horas
   banco: string | null;
   remitente: string | null; // quién envió
   destinatario: string | null; // a quién se le envió (en Zelle: "A", "Para", "Enviado a")

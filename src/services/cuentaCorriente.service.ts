@@ -611,13 +611,14 @@ export async function listarCuentasCorrientes(filtros: {
   terceroId?: number;
   canalId?: number;
   buscar?: string;
-  // true: busca solo en los datos del cliente (nombre, teléfono, cédula), no en las referencias de sus movimientos
+  // true: busca solo en los datos del cliente (nombre, teléfono, cédula), no en las referencias de sus movimientos.
+  // Trae también sus cuentas eliminadas: el cliente sigue existiendo y se le vuelven a abrir.
   soloCliente?: boolean;
   tipoTercero?: string;
   // corrientes: las que se llevan en Cuentas Corrientes. cobrar: las pasadas a Cuentas por Cobrar + toda cuenta con saldo (me deben o yo debo)
   vista?: "corrientes" | "cobrar" | "pagar" | "cajas";
 }) {
-  const cond: string[] = ["cc.activo"]; // las eliminadas no se listan
+  const cond: string[] = [filtros.soloCliente ? "t.activo" : "cc.activo"]; // las eliminadas no se listan
   if (filtros.vista === "corrientes") cond.push(`cc.modulo = 'CORRIENTE'`);
   if (filtros.vista === "cajas") cond.push(`cc.modulo = 'CAJA'`);
   // Cuentas por Cobrar lleva solo sus propios clientes (ya no se alimenta de las cuentas corrientes con saldo)
@@ -651,7 +652,9 @@ export async function listarCuentasCorrientes(filtros: {
     const digitos = texto.replace(/\D/g, "");
     if (digitos.length >= 3) {
       valores.push(`%${digitos}%`);
-      cond.push(`(${porTexto} OR regexp_replace(COALESCE(t.telefono, ''), '\\D', '', 'g') LIKE $${valores.length} OR regexp_replace(COALESCE(t.identificacion, ''), '\\D', '', 'g') LIKE $${valores.length})`);
+      // el número escrito a la colombiana o venezolana (0424…) contra el guardado con país (+58 424…)
+      valores.push(`%${digitos.length > 10 ? digitos.slice(-10) : digitos.replace(/^0+/, "") || digitos}%`);
+      cond.push(`(${porTexto} OR regexp_replace(COALESCE(t.telefono, ''), '\\D', '', 'g') LIKE $${valores.length} OR regexp_replace(COALESCE(t.identificacion, ''), '\\D', '', 'g') LIKE $${valores.length - 1})`);
     } else {
       cond.push(porTexto);
     }

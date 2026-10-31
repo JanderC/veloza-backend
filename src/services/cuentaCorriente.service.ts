@@ -611,18 +611,30 @@ export async function buscarOperacionIgual(canalId: number, montos: string[], cu
   return r.rows[0] ?? null;
 }
 
-/** Confirmaciones: los últimos movimientos del cliente, juntos, sin importar el medio ni la moneda. */
-export async function ultimosMovimientosCliente(terceroId: number) {
+/** Los últimos movimientos del cliente en un módulo, juntos, sin importar el medio ni la moneda. */
+export async function ultimosMovimientosCliente(terceroId: number, modulo: ModuloCuenta = "CAJA") {
   const r = await pool.query(
     `SELECT mc.id, mc.cuenta_corriente_id AS cuenta_id, mc.fecha, mc.descripcion, mc.tipo, mc.monto, mo.codigo AS moneda_codigo
      FROM movimientos_cuenta_corriente mc
      JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
      JOIN monedas mo ON mo.id = cc.moneda_id
-     WHERE cc.tercero_id = $1 AND cc.modulo = 'CAJA' AND NOT mc.anulado AND mc.reverso_de_id IS NULL
+     WHERE cc.tercero_id = $1 AND cc.modulo = $2 AND NOT mc.anulado AND mc.reverso_de_id IS NULL
      ORDER BY mc.fecha DESC, mc.id DESC LIMIT 12`,
-    [terceroId]
+    [terceroId, modulo]
   );
   return r.rows;
+}
+
+/** Cambiar la cuenta (Zelle, Bancolombia…) que se le lleva al cliente. No toca el saldo ni los movimientos. */
+export async function cambiarCanalCuenta(id: number, canalId: number) {
+  try {
+    const r = await pool.query(`UPDATE cuentas_corrientes SET canal_id = $1 WHERE id = $2 RETURNING id`, [canalId, id]);
+    if (!r.rows[0]) throw errorHttp("Cuenta corriente no encontrada", 404);
+  } catch (err) {
+    if ((err as { code?: string }).code === "23505") throw errorHttp("Este cliente ya tiene otra cuenta con esa cuenta y esa moneda aquí", 409);
+    throw err;
+  }
+  return obtenerCuentaCorriente(id);
 }
 
 /** Pasar una cuenta a Cuentas por Cobrar (sale de la lista de Cuentas Corrientes) o devolverla. No toca saldo ni movimientos. */

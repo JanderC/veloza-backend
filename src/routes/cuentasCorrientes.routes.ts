@@ -20,6 +20,7 @@ import {
   buscarOperacionIgual,
   ultimosMovimientosCliente,
   cambiarEstadoCuentaCorriente,
+  cambiarCanalCuenta,
   cambiarGrupoCobro,
   cambiarModuloCuentaCorriente,
   cerrarDiaCuentaCorriente,
@@ -222,6 +223,18 @@ cuentasCorrientesRouter.put("/:id/modulo", requireAuth, requireRole("ADMIN", "AS
   }
 });
 
+// La cuenta (Zelle, Bancolombia…) que se le lleva al cliente
+cuentasCorrientesRouter.put("/:id/canal", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const { canalId } = z.object({ canalId: z.number().int().positive() }).parse(req.body);
+    res.json(await cambiarCanalCuenta(id, canalId));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Cuentas por Cobrar: cambiar de grupo a un cliente
 cuentasCorrientesRouter.put("/:id/grupo", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
   try {
@@ -353,7 +366,8 @@ cuentasCorrientesRouter.post("/movimientos/:id/confirmar", requireAuth, requireR
 cuentasCorrientesRouter.get("/cliente/:terceroId/ultimos", requireAuth, async (req, res, next) => {
   try {
     const terceroId = z.coerce.number().int().positive().parse(req.params.terceroId);
-    res.json(await ultimosMovimientosCliente(terceroId));
+    const modulo = z.enum(["CORRIENTE", "POR_COBRAR", "POR_PAGAR", "CAJA"]).default("CAJA").parse(req.query.modulo);
+    res.json(await ultimosMovimientosCliente(terceroId, modulo));
   } catch (err) {
     next(err);
   }

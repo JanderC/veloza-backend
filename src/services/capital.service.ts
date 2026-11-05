@@ -3,6 +3,14 @@ import { pool } from "../db/pool";
 // Capital de giros: lo que el sistema ya sabe para el cuadre (los saldos de las cajas y las confirmaciones sin pagar)
 // y los cuadres guardados. Lo que está fuera del sistema lo llena el administrador en la pantalla.
 
+// La tabla de los datos de las cuentas (migración 055): mientras no esté, todo sigue como antes
+let hayDatosBanco: boolean | null = null;
+async function tablaDatosBanco() {
+  if (hayDatosBanco) return true;
+  hayDatosBanco = (await pool.query(`SELECT to_regclass('public.cajas_datos_banco') IS NOT NULL AS hay`)).rows[0].hay as boolean;
+  return hayDatosBanco;
+}
+
 /** Saldos de cada caja (taquillas, cajas y Caja Fuerte) por moneda, y lo que falta pagar de confirmaciones. */
 export async function obtenerDatosDelSistema() {
   const cajas = await pool.query(
@@ -25,9 +33,13 @@ export async function obtenerDatosDelSistema() {
     porCaja.set(r.id, c);
   }
   // las cuentas de banco de la empresa (Bancolombia, Nequi, Bolívares, USDT…), con su moneda y lo que tienen
+  const columnaDatos = (await tablaDatosBanco())
+    ? `COALESCE((SELECT json_agg(json_build_object('id', x.id, 'tipo', x.tipo, 'banco', x.banco, 'numero', x.numero, 'cedula', x.cedula, 'telefono', x.telefono) ORDER BY x.id) FROM cajas_datos_banco x WHERE x.caja_id = c.id), '[]') AS datos`
+    : `'[]'::json AS datos`;
   const bancos = await pool.query(
     `SELECT c.id, c.nombre, mc.codigo AS moneda,
-            COALESCE((SELECT json_agg(json_build_object('codigo', m.codigo, 'monto', s.monto) ORDER BY m.codigo) FROM saldos_caja s JOIN monedas m ON m.id = s.moneda_id WHERE s.caja_id = c.id AND s.monto <> 0), '[]') AS saldos
+            COALESCE((SELECT json_agg(json_build_object('codigo', m.codigo, 'monto', s.monto) ORDER BY m.codigo) FROM saldos_caja s JOIN monedas m ON m.id = s.moneda_id WHERE s.caja_id = c.id AND s.monto <> 0), '[]') AS saldos,
+            ${columnaDatos}
      FROM cajas c LEFT JOIN monedas mc ON mc.id = c.moneda_id
      WHERE c.activo AND c.tipo = 'BANCO' ORDER BY c.id`
   );
@@ -41,7 +53,7 @@ export async function obtenerDatosDelSistema() {
   return {
     cajas: [...porCaja.values()],
     sinRetirar: sinRetirar.rows as { cuenta_id: number; desde: string; hasta: string; cantidad: number }[],
-    bancos: bancos.rows as { id: number; nombre: string; moneda: string | null; saldos: { codigo: string; monto: string }[] }[],
+    bancos: bancos.rows as { id: number; nombre: string; moneda: string | null; saldos: { codigo: string; monto: string }[]; datos: Omit<DatoBanco, "caja_id">[] }[],
     confirmacionesPorPagar: porPagar.rows as { codigo: string; total: string; cantidad: number }[],
   };
 }
@@ -220,4 +232,121 @@ export async function guardarBorrador(datos: unknown, usuarioId: number) {
     [JSON.stringify(datos), usuarioId]
   );
   return { guardado: true };
+}
+
+// ---------- Con qué se reconoce cada cuenta de banco en un capture ----------
+
+export interface DatoBanco {
+  id: number;
+  caja_id: number;
+  tipo: "CUENTA" | "PAGO_MOVIL";
+  banco: string | null;
+  numero: string | null;
+  cedula: string | null;
+  telefono: string | null;
+}
+
+const soloDigitos = (v: string | null | undefined) => (v ?? "").replace(/\D/g, "");
+/** El teléfono venezolano sin el 0 ni el 58: 04147320762 y +58 414-7320762 quedan 4147320762. */
+export function telefonoNormal(v: string | null | undefined) {
+  const d = soloDigitos(v);
+  return d.length >= 10 ? d.slice(-10) : d;
+}
+
+export async function listarDatosBanco(cajaId: number) {
+  return (await pool.query(`SELECT id, caja_id, tipo, banco, numero, cedula, telefono FROM cajas_datos_banco WHERE caja_id = $1 ORDER BY id`, [cajaId])).rows as DatoBanco[];
+}
+
+export async function agregarDatoBanco(cajaId: number, d: { tipo: "CUENTA" | "PAGO_MOVIL"; banco?: string; numero?: string; cedula?: string; telefono?: string }, usuarioId: number) {
+  const caja = (await pool.query(`SELECT id FROM cajas WHERE id = $1 AND tipo = 'BANCO'`, [cajaId])).rows[0];
+  if (!caja) throw Object.assign(new Error("Esa cuenta de banco no existe"), { status: 404 });
+  const banco = soloDigitos(d.banco) || null;
+  if (banco && banco.length !== 4) throw Object.assign(new Error("El código del banco tiene 4 dígitos (ej. 0102 Banco de Venezuela)"), { status: 400 });
+  const numero = d.tipo === "CUENTA" ? soloDigitos(d.numero) : null;
+  const telefono = d.tipo === "PAGO_MOVIL" ? telefonoNormal(d.telefono) : null;
+  const cedula = soloDigitos(d.cedula) || null;
+  if (d.tipo === "CUENTA" && (!numero || numero.length < 4)) throw Object.assign(new Error("Escribí el número de la cuenta (por lo menos los últimos 4 dígitos)"), { status: 400 });
+  if (d.tipo === "PAGO_MOVIL" && (!telefono || telefono.length !== 10)) throw Object.assign(new Error("El teléfono del pago móvil no es válido (ej. 0414-7320762)"), { status: 400 });
+  // la misma cuenta o el mismo teléfono en otra cuenta de la empresa: el capture no sabría a cuál ir
+  const otra = (
+    await pool.query(
+      `SELECT c.nombre FROM cajas_datos_banco x JOIN cajas c ON c.id = x.caja_id
+       WHERE x.tipo = $1 AND (($1 = 'CUENTA' AND right(x.numero, 4) = right($2, 4) AND (x.banco IS NULL OR $3::text IS NULL OR x.banco = $3) AND (length(x.numero) < 10 OR length($2) < 10 OR x.numero = $2))
+                         OR ($1 = 'PAGO_MOVIL' AND x.telefono = $4))
+       LIMIT 1`,
+      [d.tipo, numero ?? "", banco, telefono]
+    )
+  ).rows[0];
+  if (otra) throw Object.assign(new Error(`Ese ${d.tipo === "CUENTA" ? "número de cuenta" : "teléfono"} ya está en la cuenta "${otra.nombre}"`), { status: 409 });
+  const r = await pool.query(
+    `INSERT INTO cajas_datos_banco (caja_id, tipo, banco, numero, cedula, telefono, usuario_id) VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, caja_id, tipo, banco, numero, cedula, telefono`,
+    [cajaId, d.tipo, banco, numero, cedula, telefono, usuarioId]
+  );
+  return r.rows[0] as DatoBanco;
+}
+
+export async function quitarDatoBanco(id: number) {
+  const r = await pool.query(`DELETE FROM cajas_datos_banco WHERE id = $1 RETURNING id`, [id]);
+  if (!r.rows[0]) throw Object.assign(new Error("Ese dato ya no está"), { status: 404 });
+  return { quitado: true };
+}
+
+/**
+ * Lo que dice el capture como origen o destino ("0102****8515", "04147320762", "0102-0123-45-0001234567"), comparado
+ * con las cuentas de la empresa. Una cuenta se reconoce por sus últimos 4 dígitos (y el banco, si los dos lo dicen);
+ * un pago móvil, por el teléfono. Si coincide con más de una cuenta no se adivina.
+ */
+export function coincideDato(escrito: string, d: Pick<DatoBanco, "tipo" | "banco" | "numero" | "telefono">) {
+  const digitos = soloDigitos(escrito);
+  if (digitos.length < 4) return false;
+  if (d.tipo === "PAGO_MOVIL") {
+    // un teléfono: 10 dígitos que empiezan con 4 (sin el 0 ni el 58)
+    const tel = /^(?:58)?0?(4\d{9})$/.exec(digitos)?.[1];
+    return !!tel && tel === d.telefono;
+  }
+  const numero = d.numero ?? "";
+  if (numero.length < 4) return false;
+  // un teléfono (pago móvil) no es una cuenta, aunque termine igual
+  if (/^(?:58)?0?4\d{9}$/.test(digitos)) return digitos === numero;
+  // enmascarada: "0102****8515" -> banco 0102, termina en 8515
+  const mascara = /(\d{4})[^\d]*[*xX•·.]{2,}[^\d]*(\d{3,})\s*$/.exec(escrito.trim());
+  const final = mascara ? mascara[2]! : digitos;
+  const bancoCapture = mascara ? mascara[1]! : digitos.length >= 20 ? digitos.slice(0, 4) : null;
+  const bancoDato = d.banco ?? (numero.length >= 20 ? numero.slice(0, 4) : null);
+  if (bancoCapture && bancoDato && bancoCapture !== bancoDato) return false;
+  // completas las dos: tienen que ser iguales
+  if (!mascara && digitos.length >= 10 && numero.length >= 10) return digitos === numero;
+  const cuantos = Math.min(4, final.length);
+  return final.slice(-cuantos) === numero.slice(-cuantos) && cuantos >= 4;
+}
+
+export async function reconocerCuentaBanco(origen: string | null, destino: string | null) {
+  if (!(await tablaDatosBanco())) return null;
+  const datos = (
+    await pool.query(
+      `SELECT x.id, x.caja_id, x.tipo, x.banco, x.numero, x.telefono, c.nombre, m.id AS moneda_id, m.codigo AS moneda
+       FROM cajas_datos_banco x JOIN cajas c ON c.id = x.caja_id
+       LEFT JOIN monedas m ON m.id = COALESCE(c.moneda_id, (SELECT id FROM monedas WHERE codigo = 'COP'))
+       WHERE c.activo AND c.tipo = 'BANCO'`
+    )
+  ).rows;
+  const buscar = (escrito: string | null) => {
+    if (!escrito) return null;
+    const cajas = [...new Map(datos.filter((d) => coincideDato(escrito, d)).map((d) => [d.caja_id, d])).values()];
+    return cajas.length === 1 ? cajas[0] : null;
+  };
+  // lo que llega a una cuenta nuestra entra; lo que sale de una cuenta nuestra, sale
+  const aDestino = buscar(destino);
+  const deOrigen = aDestino ? null : buscar(origen);
+  const d = aDestino ?? deOrigen;
+  if (!d) return null;
+  return {
+    cajaId: d.caja_id as number,
+    nombre: d.nombre as string,
+    monedaId: (d.moneda_id as number | null) ?? null,
+    moneda: (d.moneda as string | null) ?? null,
+    rol: aDestino ? ("destino" as const) : ("origen" as const),
+    dato: d.tipo === "PAGO_MOVIL" ? `pago móvil ${d.telefono}` : `cuenta terminada en ${String(d.numero).slice(-4)}`,
+  };
 }

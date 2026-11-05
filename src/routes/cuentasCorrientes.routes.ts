@@ -40,6 +40,7 @@ import {
 } from "../services/cuentaCorriente.service";
 import { importarSaldosIniciales, ResultadoFila } from "../services/importacionSaldos.service";
 import { leerComprobante } from "../services/lecturaComprobante.service";
+import { reconocerCuentaBanco } from "../services/capital.service";
 import { leerTextoEnServidor } from "../services/ocrServidor.service";
 
 export const cuentasCorrientesRouter = Router();
@@ -149,6 +150,16 @@ cuentasCorrientesRouter.post("/:id/enviar-a-confirmaciones", requireAuth, requir
 });
 
 // ¿Ya existe este cliente? (mismo nombre o mismo teléfono, en cualquier módulo) — al crear uno nuevo
+// Confirmaciones: el origen o el destino del capture es una cuenta de la empresa (Capital de giros)? Esa se alimenta sola
+cuentasCorrientesRouter.get("/bancos-empresa/reconocer", requireAuth, async (req, res, next) => {
+  try {
+    const texto = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 60) : null);
+    res.json({ cuenta: await reconocerCuentaBanco(texto(req.query.origen), texto(req.query.destino)) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 cuentasCorrientesRouter.get("/clientes-existentes", requireAuth, async (req, res, next) => {
   try {
     const q = z.object({ nombre: z.string().max(120).optional(), telefono: z.string().max(40).optional() }).parse(req.query);
@@ -546,6 +557,8 @@ const movimientoSchema = z.object({
   montoCaja: z.string().optional(),
   monedaCajaId: z.number().int().optional(),
   metodoPagoId: z.number().int().optional(),
+  // qué fue, en el movimiento de la caja (ej. la cuenta de la empresa que se alimentó con el capture)
+  observacionCaja: z.string().max(200).optional(),
 });
 
 // Corregir un movimiento mal cargado: solo administradores

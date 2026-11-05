@@ -14,6 +14,9 @@ import {
   obtenerDatosDelSistema,
   renombrarCuentaBanco,
   transferirEntreBancos,
+  agregarDatoBanco,
+  listarDatosBanco,
+  quitarDatoBanco,
 } from "../services/capital.service";
 
 export const capitalRouter = Router();
@@ -121,6 +124,44 @@ capitalRouter.get("/bancos/:id/movimientos", requireAuth, SOLO_ADMIN, async (req
     const id = idDe(req.params.id);
     if (!id) return res.status(400).json({ error: "id inválido" });
     res.json(await movimientosBanco(id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Con qué se reconoce la cuenta en un capture: número de cuenta o pago móvil (cédula, banco y teléfono)
+capitalRouter.get("/bancos/:id/datos", requireAuth, SOLO_ADMIN, async (req, res, next) => {
+  try {
+    const id = idDe(req.params.id);
+    if (!id) return res.status(400).json({ error: "id inválido" });
+    res.json(await listarDatosBanco(id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+const datoBancoSchema = z.object({
+  tipo: z.enum(["CUENTA", "PAGO_MOVIL"]),
+  banco: z.string().max(10).optional(),
+  numero: z.string().max(40).optional(),
+  cedula: z.string().max(20).optional(),
+  telefono: z.string().max(20).optional(),
+});
+capitalRouter.post("/bancos/:id/datos", requireAuth, SOLO_ADMIN, async (req, res, next) => {
+  try {
+    const id = idDe(req.params.id);
+    if (!id) return res.status(400).json({ error: "id inválido" });
+    res.status(201).json(await agregarDatoBanco(id, datoBancoSchema.parse(req.body), req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+capitalRouter.delete("/bancos/datos/:datoId", requireAuth, SOLO_ADMIN, async (req, res, next) => {
+  try {
+    const id = idDe(req.params.datoId);
+    if (!id) return res.status(400).json({ error: "id inválido" });
+    res.json(await quitarDatoBanco(id));
   } catch (err) {
     next(err);
   }

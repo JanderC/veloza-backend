@@ -37,6 +37,7 @@ interface RegistrarMovimientoCCInput {
   montoCaja?: string; // con signo, en la moneda de la caja (normalmente COP)
   monedaCajaId?: number; // moneda de la caja; si no se manda, se usa monedaId
   metodoPagoId?: number;
+  observacionCaja?: string; // qué fue, en el movimiento de la caja
   reversoDeId?: number;
   cuentaDestino?: string; // a qué cuenta del cliente se le pagó (opcional)
   // Comisión descontada del monto: la tasa viaja como factor (4% -> "0.96") y cantidad × factor = lo que queda
@@ -222,8 +223,8 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
 
       const movCajaResult = await client.query(
         `INSERT INTO movimientos_caja
-          (caja_id, moneda_id, metodo_pago_id, tipo, monto, saldo_anterior, saldo_nuevo, usuario_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+          (caja_id, moneda_id, metodo_pago_id, tipo, monto, saldo_anterior, saldo_nuevo, usuario_id, observacion)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          RETURNING *`,
         [
           input.cajaId,
@@ -234,6 +235,7 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
           saldoCajaAnterior.toFixed(4),
           saldoCajaNuevo.toFixed(4),
           input.usuarioId,
+          input.observacionCaja ?? null,
         ]
       );
       movimientoCaja = movCajaResult.rows[0];
@@ -1336,6 +1338,7 @@ export async function anularMovimiento(movimientoId: number, usuarioId: number) 
           // lo contrario de lo que se hizo en la caja
           montoCaja: (m.caja_tipo === "INGRESO" ? new Decimal(m.caja_monto).negated() : new Decimal(m.caja_monto)).toFixed(4),
           metodoPagoId: m.metodo_pago_id ?? undefined,
+          observacionCaja: `Anulación: ${m.descripcion ?? m.tipo}`.slice(0, 200),
         }
       : {}),
   });

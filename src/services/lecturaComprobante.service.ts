@@ -10,6 +10,8 @@ export interface DatosComprobante {
   banco: string | null;
   remitente: string | null; // quién envió
   destinatario: string | null; // a quién se le envió (en Zelle: "A", "Para", "Enviado a")
+  cuentaOrigen: string | null; // la cuenta o el teléfono de donde salió, como aparece ("0102****8515")
+  cuentaDestino: string | null; // la cuenta o el teléfono a donde llegó ("04147320762")
   metodo: string | null; // qué es: NEQUI, BANCOLOMBIA, ZELLE, REMITLY, WESTERN_BANCOLOMBIA, WESTERN_TAQUILLA, PAGO_FACTURA, BANCOLOMBIA_INTERNACIONAL
 }
 
@@ -72,6 +74,8 @@ function ordenar(datos: Record<string, unknown>): DatosComprobante {
     banco: limpio(datos.banco),
     remitente: limpio(datos.remitente),
     destinatario: limpio(datos.destinatario),
+    cuentaOrigen: limpio(datos.cuenta_origen)?.slice(0, 40) ?? null,
+    cuentaDestino: limpio(datos.cuenta_destino)?.slice(0, 40) ?? null,
     metodo: (() => {
       const m = texto(datos.metodo)?.toUpperCase().replace(/[\s-]+/g, "_") ?? null;
       return m && METODOS.includes(m) ? m : null;
@@ -97,6 +101,8 @@ const INSTRUCCIONES = [
   '- "banco": el medio o banco: "Zelle", "Bancolombia", "Nequi", "Banco de Venezuela", "Western Union"... Si es una pantalla de Zelle dentro de la app de un banco, es "Zelle".',
   '- "remitente": el nombre de la PERSONA que envía el dinero, solo si aparece como tal ("De", "From", "Enviado por"). El nombre de una cuenta ("Adv SafeBalance Banking - 2839") no es una persona.',
   '- "destinatario": el nombre de la persona que recibe ("A", "Para", "To", "Enviado a", "Inscrito como").',
+  '- "cuenta_origen": el número de cuenta o el teléfono de donde SALIÓ el dinero, copiado tal como aparece, con asteriscos si viene enmascarado ("Origen", "Cuenta origen", "Producto origen", "Desde"; ejemplo: "0102****8515").',
+  '- "cuenta_destino": el número de cuenta o el teléfono a donde LLEGÓ el dinero, tal como aparece ("Destino", "Cuenta destino", "Producto destino", "Teléfono", "Celular"; ejemplo: "04147320762").',
   '- "metodo": qué tipo de comprobante es, uno de estos (o null si no se sabe):',
   '  "NEQUI": comprobante de la app Nequi ("Envío a banco", "Escanea este QR con Nequi", referencias como M05115493);',
   '  "BANCOLOMBIA": transferencia nacional de Bancolombia ("¡Transferencia exitosa!", "Comprobante No.", "Producto destino / Producto origen");',
@@ -236,6 +242,8 @@ export async function leerComprobante(imagen: Buffer, mime: string): Promise<Dat
               banco: { type: "string", description: "Banco o medio: Zelle, Bancolombia, Nequi, Banco de Venezuela..." },
               remitente: { type: "string", description: "Nombre de quien envía el dinero" },
               destinatario: { type: "string", description: "Nombre de quien recibe el dinero" },
+              cuenta_origen: { type: "string", description: "Cuenta o teléfono de donde salió el dinero, tal como aparece (ej. 0102****8515)" },
+              cuenta_destino: { type: "string", description: "Cuenta o teléfono a donde llegó el dinero, tal como aparece (ej. 04147320762)" },
               metodo: {
                 type: "string",
                 enum: METODOS,

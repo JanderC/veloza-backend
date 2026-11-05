@@ -21,6 +21,8 @@ import {
   ultimosMovimientosCliente,
   cambiarEstadoCuentaCorriente,
   cambiarCanalCuenta,
+  cambiarMonedaCuenta,
+  unirCuentasCorrientes,
   cambiarGrupoCobro,
   cambiarModuloCuentaCorriente,
   cerrarDiaCuentaCorriente,
@@ -241,6 +243,30 @@ cuentasCorrientesRouter.put("/:id/canal", requireAuth, requireRole("ADMIN", "ASE
     if (id === undefined) return res.status(400).json({ error: "id inválido" });
     const { canalId } = z.object({ canalId: z.number().int().positive() }).parse(req.body);
     res.json(await cambiarCanalCuenta(id, canalId));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// La moneda en que se lleva la contabilidad del cliente (sin convertir lo anotado)
+cuentasCorrientesRouter.put("/:id/moneda", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const { monedaId } = z.object({ monedaId: z.number().int().positive() }).parse(req.body);
+    res.json(await cambiarMonedaCuenta(id, monedaId));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Dos cuentas del mismo cliente en una sola: los movimientos de esta pasan a la otra
+cuentasCorrientesRouter.post("/:id/unir", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
+  try {
+    const id = entero(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: "id inválido" });
+    const { destinoId } = z.object({ destinoId: z.number().int().positive() }).parse(req.body);
+    res.json(await unirCuentasCorrientes(id, destinoId));
   } catch (err) {
     next(err);
   }

@@ -639,6 +639,72 @@ export async function cambiarCanalCuenta(id: number, canalId: number) {
   return obtenerCuentaCorriente(id);
 }
 
+/**
+ * La moneda en que se lleva la contabilidad del cliente: la cuenta pasa a esa moneda tal cual, sin convertir lo que
+ * tiene anotado (para cuando lo anotado ya está en esa moneda, o la cuenta está vacía). Confirmaciones no: ahí hay una
+ * cuenta por moneda.
+ */
+export async function cambiarMonedaCuenta(id: number, monedaId: number) {
+  const cuenta = (await pool.query(`SELECT id, modulo FROM cuentas_corrientes WHERE id = $1`, [id])).rows[0];
+  if (!cuenta) throw errorHttp("Cuenta corriente no encontrada", 404);
+  if (cuenta.modulo === "CAJA") throw errorHttp("En Confirmaciones cada moneda va en su propia cuenta", 400);
+  const moneda = (await pool.query(`SELECT id FROM monedas WHERE id = $1`, [monedaId])).rows[0];
+  if (!moneda) throw errorHttp("Esa moneda no existe", 400);
+  try {
+    // la tasa de cobro era para pasar de esa otra moneda a la de antes: con otra moneda ya no sirve
+    await pool.query(
+      `UPDATE cuentas_corrientes SET moneda_id = $1,
+         moneda_cobro_id = CASE WHEN moneda_cobro_id = $1 THEN NULL ELSE moneda_cobro_id END,
+         tasa_cobro = CASE WHEN moneda_cobro_id = $1 THEN NULL ELSE tasa_cobro END
+       WHERE id = $2`,
+      [monedaId, id]
+    );
+  } catch (err) {
+    if ((err as { code?: string }).code === "23505") throw errorHttp("Este cliente ya tiene una cuenta en esa moneda: unilas en una sola", 409);
+    throw err;
+  }
+  return obtenerCuentaCorriente(id);
+}
+
+/**
+ * Dos cuentas del mismo cliente en el mismo módulo quedan en una sola: los movimientos de la que se cierra pasan tal
+ * cual (sin convertir) a la que queda, el total corrido se rehace en orden de carga y la otra queda vacía y cerrada.
+ * Sus cierres de día quedan con ella, como historial.
+ */
+export async function unirCuentasCorrientes(origenId: number, destinoId: number) {
+  if (origenId === destinoId) throw errorHttp("Elegí otra cuenta", 400);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const cuentas = (await client.query(`SELECT * FROM cuentas_corrientes WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE`, [[origenId, destinoId]])).rows;
+    const origen = cuentas.find((c) => c.id === origenId);
+    const destino = cuentas.find((c) => c.id === destinoId);
+    if (!origen || !destino) throw errorHttp("Esa cuenta no existe", 404);
+    if (origen.tercero_id !== destino.tercero_id) throw errorHttp("Solo se unen cuentas del mismo cliente", 400);
+    if (origen.modulo !== destino.modulo) throw errorHttp("Solo se unen cuentas del mismo módulo", 400);
+    if (origen.modulo === "CAJA") throw errorHttp("En Confirmaciones cada moneda va en su propia cuenta", 400);
+    await client.query(`UPDATE movimientos_cuenta_corriente SET canal_id = COALESCE(canal_id, $1), cuenta_corriente_id = $2 WHERE cuenta_corriente_id = $3`, [origen.canal_id, destinoId, origenId]);
+    const movs = (await client.query(`SELECT id, monto FROM movimientos_cuenta_corriente WHERE cuenta_corriente_id = $1 ORDER BY id`, [destinoId])).rows;
+    let saldo = new Decimal(0);
+    for (const m of movs) {
+      const nuevo = saldo.plus(m.monto);
+      await client.query(`UPDATE movimientos_cuenta_corriente SET saldo_anterior = $1, saldo_nuevo = $2 WHERE id = $3`, [saldo.toFixed(4), nuevo.toFixed(4), m.id]);
+      saldo = nuevo;
+    }
+    const esperado = new Decimal(origen.saldo_actual).plus(destino.saldo_actual);
+    if (!saldo.eq(esperado)) throw errorHttp(`Los movimientos suman ${saldo.toFixed(2)} y las dos cuentas ${esperado.toFixed(2)}: no se unió nada, avisale al administrador`, 409);
+    await client.query(`UPDATE cuentas_corrientes SET saldo_actual = $1, activo = true WHERE id = $2`, [saldo.toFixed(4), destinoId]);
+    await client.query(`UPDATE cuentas_corrientes SET saldo_actual = 0, activo = false WHERE id = $1`, [origenId]);
+    await client.query("COMMIT");
+    return { cuenta: await obtenerCuentaCorriente(destinoId), movimientos: movs.length };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 /** Pasar una cuenta a Cuentas por Cobrar (sale de la lista de Cuentas Corrientes) o devolverla. No toca saldo ni movimientos. */
 export async function cambiarModuloCuentaCorriente(id: number, modulo: ModuloCuenta) {
   const r = await pool.query(`UPDATE cuentas_corrientes SET modulo = $1 WHERE id = $2 RETURNING id`, [modulo, id]);

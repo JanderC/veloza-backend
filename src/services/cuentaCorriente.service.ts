@@ -1022,6 +1022,31 @@ export async function generarExcelEstadoCuenta(id: number, filtros: { desde?: st
  * Las últimas tasas y porcentajes de comisión usados, para volver a aplicarlos sin escribirlos.
  * Primero las de esta cuenta, después las del resto; la más reciente adelante.
  */
+/**
+ * Lo que ya se escribió en los movimientos de un módulo (de todos los clientes), para sugerirlo al escribir: las
+ * referencias ("Venta de Zelle", "Abono efectivo") y las descripciones ("Bancolombia", "Zelle", nombres). Las más
+ * usadas primero. Las descripciones que son solo números (referencias de transferencias) no se sugieren.
+ */
+export async function textosUsados(modulo: string) {
+  const r = await pool.query(
+    `WITH d AS (
+       SELECT regexp_replace(trim(split_part(m.descripcion, ' · ', 1)), ' \\([\\d.,]+ [A-Z]{3,5} a [\\d.,]+\\)$', '') AS ref,
+              regexp_replace(trim(split_part(m.descripcion, ' · ', 2)), ' \\([\\d.,]+ [A-Z]{3,5} a [\\d.,]+\\)$', '') AS des,
+              m.created_at
+       FROM movimientos_cuenta_corriente m JOIN cuentas_corrientes cc ON cc.id = m.cuenta_corriente_id
+       WHERE cc.modulo = $1 AND m.reverso_de_id IS NULL AND m.descripcion IS NOT NULL AND m.descripcion !~ '^Reverso de'
+         AND m.created_at > now() - interval '180 days'
+     )
+     SELECT 'ref' AS tipo, min(ref) AS texto, count(*) AS n, max(created_at) AS ultimo FROM d WHERE length(ref) BETWEEN 2 AND 60 GROUP BY lower(ref)
+     UNION ALL
+     SELECT 'des', min(des), count(*), max(created_at) FROM d WHERE length(des) BETWEEN 2 AND 60 AND des ~ '[A-Za-zÁÉÍÓÚáéíóúÑñ]' GROUP BY lower(des)
+     ORDER BY n DESC, ultimo DESC`,
+    [modulo]
+  );
+  const de = (t: string, limite: number) => r.rows.filter((x) => x.tipo === t).slice(0, limite).map((x) => x.texto as string);
+  return { referencias: de("ref", 60), descripciones: de("des", 120) };
+}
+
 export async function obtenerTasasRecientes(cuentaId: number) {
   const r = await pool.query(
     `SELECT mc.tasa, mc.tasa_es_porcentaje, max(mc.id) AS ultimo, bool_or(mc.cuenta_corriente_id = $1) AS de_esta

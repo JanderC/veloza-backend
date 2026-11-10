@@ -22,6 +22,7 @@ import {
   cambiarEstadoCuentaCorriente,
   cambiarCanalCuenta,
   cambiarMonedaCuenta,
+  textosUsados,
   unirCuentasCorrientes,
   cambiarGrupoCobro,
   cambiarModuloCuentaCorriente,
@@ -157,6 +158,16 @@ cuentasCorrientesRouter.get("/bancos-empresa/reconocer", requireAuth, async (req
   try {
     const texto = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 60) : null);
     res.json({ cuenta: await reconocerCuentaBanco(texto(req.query.origen), texto(req.query.destino)) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Lo que ya se escribió en las referencias y descripciones del módulo, para sugerirlo al escribir
+cuentasCorrientesRouter.get("/textos-usados", requireAuth, async (req, res, next) => {
+  try {
+    const modulo = z.enum(["CORRIENTE", "POR_COBRAR", "POR_PAGAR", "CAJA"]).parse(req.query.modulo ?? "CORRIENTE");
+    res.json(await textosUsados(modulo));
   } catch (err) {
     next(err);
   }

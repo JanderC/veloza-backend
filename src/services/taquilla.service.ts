@@ -298,7 +298,14 @@ async function mensajeYaPagada(movimientoId: number) {
 }
 
 /** Deja el saldo de la caja en `nuevo` y anota el movimiento por la diferencia. */
-async function fijarSaldo(client: PoolClient, cajaId: number, monedaId: number, nuevo: Decimal, usuarioId: number) {
+/** La referencia de un movimiento de dinero hecho a mano: obligatoria (de dónde viene o a dónde va). */
+function exigirReferencia(referencia: string | undefined) {
+  const limpia = (referencia ?? "").trim();
+  if (limpia.length < 3) throw errorHttp("Escribí la referencia: de dónde viene o a dónde va el dinero", 400);
+  return limpia;
+}
+
+async function fijarSaldo(client: PoolClient, cajaId: number, monedaId: number, nuevo: Decimal, usuarioId: number, observacion: string | null = null) {
   const saldo = await client.query(`SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`, [cajaId, monedaId]);
   const anterior = new Decimal(saldo.rows[0]?.monto ?? 0);
   if (saldo.rows[0]) await client.query(`UPDATE saldos_caja SET monto = $1 WHERE id = $2`, [nuevo.toFixed(4), saldo.rows[0].id]);
@@ -306,8 +313,8 @@ async function fijarSaldo(client: PoolClient, cajaId: number, monedaId: number, 
   const diferencia = nuevo.minus(anterior);
   if (!diferencia.isZero()) {
     await client.query(
-      `INSERT INTO movimientos_caja (caja_id, moneda_id, tipo, monto, saldo_anterior, saldo_nuevo, usuario_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [cajaId, monedaId, diferencia.isPositive() ? "INGRESO" : "EGRESO", diferencia.abs().toFixed(4), anterior.toFixed(4), nuevo.toFixed(4), usuarioId]
+      `INSERT INTO movimientos_caja (caja_id, moneda_id, tipo, monto, saldo_anterior, saldo_nuevo, usuario_id, observacion) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [cajaId, monedaId, diferencia.isPositive() ? "INGRESO" : "EGRESO", diferencia.abs().toFixed(4), anterior.toFixed(4), nuevo.toFixed(4), usuarioId, observacion]
     );
   }
 }
@@ -436,7 +443,8 @@ export async function cerrarSesionTaquilla(input: { contado: Partial<Record<Codi
  * Traer efectivo de la Caja Fuerte a la taquilla, o enviárselo. Con la taquilla cerrada también se puede traer:
  * alimentarla la deja abierta en esa moneda.
  */
-export async function moverConCajaFuerte(input: { monedaCodigo: string; monto: string; sentido: "TRAER" | "ENVIAR"; usuarioId: number }) {
+export async function moverConCajaFuerte(input: { monedaCodigo: string; monto: string; sentido: "TRAER" | "ENVIAR"; usuarioId: number; referencia?: string }) {
+  const referencia = exigirReferencia(input.referencia);
   const monto = aDecimal(input.monto, "El monto");
   if (monto.isZero()) throw errorHttp("El monto no puede ser cero", 400);
   const caja = await cajaDeTaquilla();
@@ -454,7 +462,7 @@ export async function moverConCajaFuerte(input: { monedaCodigo: string; monto: s
       codigo: moneda.codigo,
       monto,
       usuarioId: input.usuarioId,
-      observacion: traer ? `Caja Fuerte alimenta a ${caja.nombre}` : `${caja.nombre} envía a Caja Fuerte`,
+      observacion: `${traer ? `Caja Fuerte alimenta a ${caja.nombre}` : `${caja.nombre} envía a Caja Fuerte`} · ${referencia}`,
     });
     await client.query("COMMIT");
   } catch (err) {
@@ -480,7 +488,8 @@ async function exigirSesion(cajaId: number, monedaId: number, usuarioId: number,
  * Sumar o descontar efectivo de la caja con la sesión abierta (reponer, retirar).
  * monto con signo: + entra, - sale. No deja la caja en negativo.
  */
-export async function moverCajaTaquilla(input: { monedaCodigo: string; monto: string; usuarioId: number }) {
+export async function moverCajaTaquilla(input: { monedaCodigo: string; monto: string; usuarioId: number; referencia?: string }) {
+  const referencia = exigirReferencia(input.referencia);
   let monto: Decimal;
   try {
     monto = new Decimal(input.monto);
@@ -500,7 +509,7 @@ export async function moverCajaTaquilla(input: { monedaCodigo: string; monto: st
     const saldo = await client.query(`SELECT monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`, [caja.id, moneda.id]);
     const nuevo = new Decimal(saldo.rows[0]?.monto ?? 0).plus(monto);
     if (nuevo.isNegative()) throw errorHttp("La caja no tiene tanto para descontar", 409);
-    await fijarSaldo(client, caja.id, moneda.id, nuevo, input.usuarioId);
+    await fijarSaldo(client, caja.id, moneda.id, nuevo, input.usuarioId, `Ajuste · ${referencia}`);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");

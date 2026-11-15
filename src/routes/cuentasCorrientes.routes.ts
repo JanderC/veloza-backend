@@ -118,8 +118,9 @@ cuentasCorrientesRouter.get("/", requireAuth, async (req, res, next) => {
     res.json(
       await listarCuentasCorrientes({
         terceroId: entero(req.query.terceroId),
+        cuentaId: entero(req.query.cuentaId),
         canalId: entero(req.query.canalId),
-        buscar: typeof req.query.buscar === "string" ? req.query.buscar : undefined,
+        buscar: typeof req.query.buscar === "string" ? req.query.buscar.slice(0, 80) : undefined,
         soloCliente: req.query.soloCliente === "1",
         tipoTercero: tipo,
         vista: req.query.vista === "corrientes" || req.query.vista === "cobrar" || req.query.vista === "pagar" || req.query.vista === "cajas" ? req.query.vista : undefined,

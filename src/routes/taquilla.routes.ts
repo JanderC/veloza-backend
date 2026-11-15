@@ -60,7 +60,7 @@ taquillaRouter.post("/sesion/cerrar", requireAuth, ROLES, async (req, res, next)
 // Sumar (+) o descontar (-) efectivo de la caja con la sesión abierta
 taquillaRouter.post("/caja", requireAuth, ROLES, async (req, res, next) => {
   try {
-    const datos = z.object({ monedaCodigo: z.enum(["COP", "USD", "EUR"]), monto: z.string() }).parse(req.body);
+    const datos = z.object({ monedaCodigo: z.enum(["COP", "USD", "EUR"]), monto: z.string(), referencia: z.string().max(300).optional() }).parse(req.body);
     res.status(201).json(await t(req, () => moverCajaTaquilla({ ...datos, usuarioId: req.user!.id })));
   } catch (err) {
     next(err);
@@ -70,7 +70,7 @@ taquillaRouter.post("/caja", requireAuth, ROLES, async (req, res, next) => {
 // Traer efectivo de la Caja Fuerte a la taquilla, o enviárselo
 taquillaRouter.post("/caja-fuerte", requireAuth, ROLES, async (req, res, next) => {
   try {
-    const datos = z.object({ monedaCodigo: z.enum(["COP", "USD", "EUR"]), monto: z.string(), sentido: z.enum(["TRAER", "ENVIAR"]) }).parse(req.body);
+    const datos = z.object({ monedaCodigo: z.enum(["COP", "USD", "EUR"]), monto: z.string(), sentido: z.enum(["TRAER", "ENVIAR"]), referencia: z.string().max(300).optional() }).parse(req.body);
     res.status(201).json(await t(req, () => moverConCajaFuerte({ ...datos, usuarioId: req.user!.id })));
   } catch (err) {
     next(err);

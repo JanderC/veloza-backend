@@ -725,8 +725,13 @@ const COINCIDE_MOVIMIENTO = (a: string, p: string) =>
   `((position(' · ' in ${a}.descripcion) > 0 AND split_part(${a}.descripcion, ' · ', 2) ILIKE ${p}) OR ${a}.cuenta_destino ILIKE ${p}` +
   ` OR EXISTS (SELECT 1 FROM movimiento_transferencias tr WHERE tr.movimiento_id = ${a}.id AND (tr.referencia ILIKE ${p} OR tr.remitente ILIKE ${p})))`;
 
+/** Tope de cuentas que devuelve una búsqueda en Confirmaciones: con más que eso hay que escribir algo más. */
+export const TOPE_BUSQUEDA_CAJAS = 120;
+
 export async function listarCuentasCorrientes(filtros: {
   terceroId?: number;
+  // una sola cuenta (la que está abierta), sin traer la lista entera
+  cuentaId?: number;
   canalId?: number;
   buscar?: string;
   // true: busca solo en los datos del cliente (nombre, teléfono, cédula), no en las referencias de sus movimientos.
@@ -748,10 +753,16 @@ export async function listarCuentasCorrientes(filtros: {
     valores.push(filtros.terceroId);
     cond.push(`cc.tercero_id = $${valores.length}`);
   }
+  if (filtros.cuentaId) {
+    valores.push(filtros.cuentaId);
+    cond.push(`cc.id = $${valores.length}`);
+  }
   if (filtros.canalId) {
     valores.push(filtros.canalId);
     cond.push(`cc.canal_id = $${valores.length}`);
   }
+  // Los que se llaman así van primero (y son los que quedan si la búsqueda trae demasiados)
+  let ordenBusqueda = "";
   if (filtros.tipoTercero) {
     valores.push(filtros.tipoTercero);
     cond.push(`t.tipo::text = $${valores.length}`);
@@ -763,8 +774,16 @@ export async function listarCuentasCorrientes(filtros: {
     // ...o por referencia: la del cliente, o la anotada en alguno de sus movimientos (número de transferencia, MTCN, quién envió)
     const porReferencia =
       texto.length >= 3 && !filtros.soloCliente
-        ? ` OR cc.referencia ILIKE $${valores.length} OR EXISTS (SELECT 1 FROM movimientos_cuenta_corriente mr WHERE mr.cuenta_corriente_id = cc.id AND NOT mr.anulado AND ${COINCIDE_MOVIMIENTO("mr", `$${valores.length}`)})`
+        ? // Las cuentas con un movimiento que coincide se buscan UNA vez (no una consulta por cada cuenta, que con miles
+          // de clientes dejaba la búsqueda pegada): se recorren los movimientos y las transferencias una sola vez.
+          ` OR cc.referencia ILIKE $${valores.length} OR cc.id = ANY(ARRAY(
+              SELECT mr.cuenta_corriente_id FROM movimientos_cuenta_corriente mr
+               WHERE NOT mr.anulado AND ((position(' · ' in mr.descripcion) > 0 AND split_part(mr.descripcion, ' · ', 2) ILIKE $${valores.length}) OR mr.cuenta_destino ILIKE $${valores.length})
+              UNION
+              SELECT mr.cuenta_corriente_id FROM movimiento_transferencias tr JOIN movimientos_cuenta_corriente mr ON mr.id = tr.movimiento_id
+               WHERE NOT mr.anulado AND (tr.referencia ILIKE $${valores.length} OR tr.remitente ILIKE $${valores.length})))`
         : "";
+    ordenBusqueda = `(t.nombre ILIKE $${valores.length} OR ${normalizarSql("t.nombre")} LIKE ${normalizarSql(`$${valores.length}`)}) DESC, `;
     // el nombre sin importar tildes: "Hernandez" encuentra a "Hernández"
     const porTexto = `(t.nombre ILIKE $${valores.length} OR ${normalizarSql("t.nombre")} LIKE ${normalizarSql(`$${valores.length}`)} OR t.identificacion ILIKE $${valores.length}${porReferencia})`;
     const digitos = texto.replace(/\D/g, "");
@@ -777,7 +796,9 @@ export async function listarCuentasCorrientes(filtros: {
       cond.push(porTexto);
     }
   }
-  const r = await pool.query(`${SELECT_CUENTA} ${cond.length ? `WHERE ${cond.join(" AND ")}` : ""} ORDER BY t.nombre, ch.nombre`, valores);
+  // En Confirmaciones hay miles de clientes: una búsqueda corta ("a") no trae todos, solo los primeros
+  const tope = filtros.vista === "cajas" && filtros.buscar?.trim() && !filtros.terceroId && !filtros.cuentaId ? ` LIMIT ${TOPE_BUSQUEDA_CAJAS}` : "";
+  const r = await pool.query(`${SELECT_CUENTA} ${cond.length ? `WHERE ${cond.join(" AND ")}` : ""} ORDER BY ${ordenBusqueda}t.nombre, ch.nombre${tope}`, valores);
   // Si se buscó algo, a cada cuenta se le dice en qué movimiento apareció (para no confundir dos clientes con la misma referencia)
   const buscado = filtros.buscar?.trim() ?? "";
   let filas = r.rows;

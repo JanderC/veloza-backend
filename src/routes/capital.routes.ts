@@ -1,4 +1,6 @@
 import { Router } from "express";
+import multer from "multer";
+import { cargarExtracto, libroBanco, revisarExtracto, textoDeArchivo } from "../services/libroBancos.service";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth";
 import {
@@ -113,6 +115,41 @@ capitalRouter.post("/bancos/:id/movimiento", requireAuth, SOLO_ADMIN, async (req
     if (!id) return res.status(400).json({ error: "id inválido" });
     const d = z.object({ tipo: z.enum(["INGRESO", "EGRESO"]), moneda: MONEDA, monto: MONTO, nota: z.string().trim().min(2, "Escribí qué fue").max(200) }).parse(req.body);
     res.status(201).json(await movimientoBanco(id, d, req.user!.id));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// El libro contable de una cuenta de banco: qué entró y qué salió, quién, de qué cliente y con qué referencia
+capitalRouter.get("/bancos/:id/libro", requireAuth, SOLO_ADMIN, async (req, res, next) => {
+  try {
+    const id = idDe(req.params.id);
+    if (!id) return res.status(400).json({ error: "id inválido" });
+    const fecha = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional();
+    const f = z.object({ desde: fecha, hasta: fecha, buscar: z.string().max(80).optional() }).parse(req.query);
+    res.json(await libroBanco(id, f));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Estado de cuenta del banco (PDF, o el mismo texto en MD/TXT): primero se revisa y después se carga
+const subirExtracto = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const cajaDelForm = (v: unknown) => (typeof v === "string" && /^\d+$/.test(v) ? Number(v) : undefined);
+capitalRouter.post("/bancos/extracto/revisar", requireAuth, SOLO_ADMIN, subirExtracto.single("archivo"), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "Elegí el archivo del estado de cuenta" });
+    const texto = await textoDeArchivo(req.file.buffer, req.file.originalname, req.file.mimetype);
+    res.json(await revisarExtracto(texto, cajaDelForm(req.body?.cajaId)));
+  } catch (err) {
+    next(err);
+  }
+});
+capitalRouter.post("/bancos/extracto/cargar", requireAuth, SOLO_ADMIN, subirExtracto.single("archivo"), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "Elegí el archivo del estado de cuenta" });
+    const texto = await textoDeArchivo(req.file.buffer, req.file.originalname, req.file.mimetype);
+    res.status(201).json(await cargarExtracto(texto, req.file.originalname, cajaDelForm(req.body?.cajaId), req.user!.id));
   } catch (err) {
     next(err);
   }

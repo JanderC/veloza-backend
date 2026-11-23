@@ -606,6 +606,7 @@ const movimientoSchema = z.object({
   metodoPagoId: z.number().int().optional(),
   // qué fue, en el movimiento de la caja (ej. la cuenta de la empresa que se alimentó con el capture)
   observacionCaja: z.string().max(200).optional(),
+  referenciaCaja: z.string().max(60).optional(),
 });
 
 // Corregir un movimiento mal cargado: solo administradores

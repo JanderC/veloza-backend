@@ -2,6 +2,7 @@ import { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import * as XLSX from "xlsx";
 import { pool } from "../db/pool";
+import { libroListo, revisarReferenciaEnBanco } from "./libroBancos.service";
 import { abrirTurnoSiFalta } from "./cierreCaja.service";
 import { enviarMensaje } from "./whatsapp/envio";
 import { asegurarChat } from "./whatsapp/mensajes";
@@ -38,6 +39,8 @@ interface RegistrarMovimientoCCInput {
   monedaCajaId?: number; // moneda de la caja; si no se manda, se usa monedaId
   metodoPagoId?: number;
   observacionCaja?: string; // qué fue, en el movimiento de la caja
+  // la referencia del banco o del capture: queda en el libro de la cuenta y no se repite para otro cliente
+  referenciaCaja?: string;
   reversoDeId?: number;
   cuentaDestino?: string; // a qué cuenta del cliente se le pagó (opcional)
   // Comisión descontada del monto: la tasa viaja como factor (4% -> "0.96") y cantidad × factor = lo que queda
@@ -186,6 +189,24 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
       const tipoMovimiento = montoCaja.isPositive() ? "INGRESO" : "EGRESO";
       const montoAbsoluto = montoCaja.abs();
 
+      // Cuenta de banco de la empresa (Confirmaciones): la referencia no entra dos veces para dos clientes, y si esa
+      // plata ya está en el libro porque vino en un estado de cuenta, se enlaza con ese movimiento (no se suma otra vez)
+      const esBanco = (await client.query(`SELECT tipo FROM cajas WHERE id = $1`, [input.cajaId])).rows[0]?.tipo === "BANCO";
+      const conLibro = esBanco && (await libroListo());
+      if (conLibro && !input.reversoDeId) {
+        const { enlazarCon } = await revisarReferenciaEnBanco(client, {
+          cajaId: input.cajaId,
+          referencia: input.referenciaCaja ?? null,
+          tipo: tipoMovimiento,
+          monto: montoAbsoluto.toFixed(4),
+        });
+        if (enlazarCon) {
+          await client.query(`UPDATE movimientos_cuenta_corriente SET movimiento_caja_id = $1 WHERE id = $2`, [enlazarCon, movResult.rows[0].id]);
+          if (input.observacionCaja) await client.query(`UPDATE movimientos_caja SET observacion = $1 WHERE id = $2`, [input.observacionCaja, enlazarCon]);
+          movimientoCaja = (await client.query(`SELECT * FROM movimientos_caja WHERE id = $1`, [enlazarCon])).rows[0];
+        }
+      }
+    if (!movimientoCaja) {
       // Como en los fondeos: si la caja no tiene turno abierto en esa moneda, se abre con este movimiento
       await abrirTurnoSiFalta(client, input.cajaId, monedaCajaId, input.usuarioId);
 
@@ -239,10 +260,14 @@ export async function registrarMovimientoCuentaCorriente(input: RegistrarMovimie
         ]
       );
       movimientoCaja = movCajaResult.rows[0];
+      if (conLibro && input.referenciaCaja?.trim()) {
+        await client.query(`UPDATE movimientos_caja SET referencia = $1 WHERE id = $2`, [input.referenciaCaja.trim().slice(0, 60), movimientoCaja.id]);
+      }
       await client.query(`UPDATE movimientos_cuenta_corriente SET movimiento_caja_id = $1 WHERE id = $2`, [
         movimientoCaja.id,
         movResult.rows[0].id,
       ]);
+    }
     }
     if (input.reversoDeId) {
       await client.query(`UPDATE movimientos_cuenta_corriente SET anulado = true WHERE id = $1`, [input.reversoDeId]);
@@ -1413,7 +1438,7 @@ export async function pagarConfirmacionPorOtroMetodo(movimientoId: number, cajaI
 export async function anularMovimiento(movimientoId: number, usuarioId: number) {
   const r = await pool.query(
     `SELECT mc.*, cc.tercero_id, cc.canal_id, cc.moneda_id, mcaja.caja_id, mcaja.moneda_id AS caja_moneda_id, mcaja.tipo AS caja_tipo,
-            mcaja.monto AS caja_monto, mcaja.metodo_pago_id
+            mcaja.monto AS caja_monto, mcaja.metodo_pago_id, ${(await libroListo()) ? "mcaja.de_extracto" : "false"} AS caja_de_extracto
      FROM movimientos_cuenta_corriente mc
      JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
      LEFT JOIN movimientos_caja mcaja ON mcaja.id = mc.movimiento_caja_id
@@ -1443,7 +1468,7 @@ export async function anularMovimiento(movimientoId: number, usuarioId: number) 
     fecha: new Date(m.fecha).toISOString(),
     usuarioId,
     reversoDeId: m.id,
-    ...(m.caja_id
+    ...(m.caja_id && !m.caja_de_extracto
       ? {
           cajaId: m.caja_id,
           monedaCajaId: m.caja_moneda_id,

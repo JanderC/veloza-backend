@@ -89,6 +89,26 @@ tercerosRouter.get("/:id", requireAuth, async (req, res, next) => {
 
 const actualizarTerceroSchema = crearTerceroSchema.partial();
 
+// Ponerle la cédula a un cliente que no la tiene (el aviso de Confirmaciones). La puede cargar también el cajero;
+// no cambia una cédula que ya está puesta (eso se hace en "Datos del cliente").
+tercerosRouter.patch("/:id/cedula", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+    const { identificacion } = z
+      .object({ identificacion: z.string().trim().min(4, "Escribí la cédula completa").max(30).regex(/\d{4,}/, "La cédula tiene que tener números") })
+      .parse(req.body);
+    const actual = await pool.query(`SELECT identificacion FROM terceros WHERE id = $1`, [id]);
+    if (!actual.rows[0]) return res.status(404).json({ error: "Cliente no encontrado" });
+    if (actual.rows[0].identificacion?.trim() && req.user!.rol === "CAJERO") return res.status(409).json({ error: "Este cliente ya tiene cédula" });
+    const r = await pool.query(`UPDATE terceros SET identificacion = $1 WHERE id = $2 RETURNING *`, [identificacion, id]);
+    res.json(r.rows[0]);
+  } catch (err) {
+    if ((err as { code?: string }).code === "23505") return res.status(409).json({ error: "Esa cédula ya está registrada en otro cliente" });
+    next(err);
+  }
+});
+
 tercerosRouter.put("/:id", requireAuth, requireRole("ADMIN", "ASESOR"), async (req, res, next) => {
   try {
     const idParam = req.params.id;

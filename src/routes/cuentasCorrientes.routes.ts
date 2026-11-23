@@ -205,7 +205,16 @@ const crearCuentaSchema = z
     monedaCobroId: z.number().int().optional(),
     tasaCobro: z.string().optional(),
   })
-  .refine((d) => d.terceroId !== undefined || d.nuevoTercero !== undefined, { message: "Elegí un tercero o creá uno nuevo" });
+  .refine((d) => d.terceroId !== undefined || d.nuevoTercero !== undefined, { message: "Elegí un tercero o creá uno nuevo" })
+  // Confirmaciones: el cliente nuevo va con nombre y apellido y con su teléfono (con "Daniel" solo se confundía con todos los Daniel)
+  .refine((d) => d.modulo !== "CAJA" || !d.nuevoTercero || d.nuevoTercero.nombre.split(/\s+/).filter((p) => /\p{L}{2,}/u.test(p)).length >= 2, {
+    message: "Escribí el nombre y el apellido del cliente (ej. Daniel Pérez), no solo el nombre",
+    path: ["nuevoTercero", "nombre"],
+  })
+  .refine((d) => d.modulo !== "CAJA" || !d.nuevoTercero || (d.nuevoTercero.telefono ?? "").replace(/\D/g, "").length >= 10, {
+    message: "El número de teléfono del cliente es obligatorio (al menos 10 dígitos)",
+    path: ["nuevoTercero", "telefono"],
+  });
 
 cuentasCorrientesRouter.post("/", requireAuth, requireRole("ADMIN", "ASESOR", "CAJERO"), async (req, res, next) => {
   try {

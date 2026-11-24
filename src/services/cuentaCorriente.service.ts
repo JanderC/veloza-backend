@@ -3,6 +3,7 @@ import Decimal from "decimal.js";
 import * as XLSX from "xlsx";
 import { pool } from "../db/pool";
 import { libroListo, revisarReferenciaEnBanco } from "./libroBancos.service";
+import { ENVIOS_BOLIVARES, comisionBolivares, type EnvioBolivares } from "./comisionesBolivares";
 import { abrirTurnoSiFalta } from "./cierreCaja.service";
 import { enviarMensaje } from "./whatsapp/envio";
 import { asegurarChat } from "./whatsapp/mensajes";
@@ -1387,7 +1388,37 @@ export async function reactivarMovimientoCuentaCorriente(movimientoId: number, u
  * Bancolombia, Nequi, bolívares, USDT…). Queda pagada en el momento: se anota el pago en su cuenta y sale de la cuenta
  * de la empresa elegida. Igual que el pago en taquilla, pero sin taquilla.
  */
-export async function pagarConfirmacionPorOtroMetodo(movimientoId: number, cajaId: number, usuarioId: number) {
+/**
+ * La comisión que cobra el banco por mandar bolívares: sale de la misma cuenta, aparte del pago (como en el estado de
+ * cuenta: "PAGOMOVIL TERCEROS…" y después "COBRO COMISION PAG MOVIL"). No toca la cuenta del cliente.
+ */
+async function cobrarComisionBolivares(cajaId: number, monedaId: number, monto: Decimal.Value, envio: EnvioBolivares, detalle: string, usuarioId: number) {
+  const comision = comisionBolivares(monto, envio);
+  if (comision.lte(0)) return null;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    let fila = (await client.query(`SELECT id, monto FROM saldos_caja WHERE caja_id = $1 AND moneda_id = $2 FOR UPDATE`, [cajaId, monedaId])).rows[0];
+    if (!fila) fila = (await client.query(`INSERT INTO saldos_caja (caja_id, moneda_id, monto) VALUES ($1, $2, 0) RETURNING id, monto`, [cajaId, monedaId])).rows[0];
+    const antes = new Decimal(fila.monto);
+    const despues = antes.minus(comision);
+    const t = ENVIOS_BOLIVARES[envio];
+    await client.query(
+      `INSERT INTO movimientos_caja (caja_id, moneda_id, tipo, monto, saldo_anterior, saldo_nuevo, usuario_id, observacion) VALUES ($1, $2, 'EGRESO', $3, $4, $5, $6, $7)`,
+      [cajaId, monedaId, comision.toFixed(4), antes.toFixed(4), despues.toFixed(4), usuarioId, `Comisión ${t.etiqueta.toLowerCase()} (${t.porcentaje.replace(".", ",")} %) · ${detalle}`.slice(0, 200)]
+    );
+    await client.query(`UPDATE saldos_caja SET monto = $1 WHERE id = $2`, [despues.toFixed(4), fila.id]);
+    await client.query("COMMIT");
+    return comision.toFixed(2);
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function pagarConfirmacionPorOtroMetodo(movimientoId: number, cajaId: number, usuarioId: number, envio?: EnvioBolivares) {
   const caja = (await pool.query(`SELECT id, nombre FROM cajas WHERE id = $1 AND tipo = 'BANCO' AND activo`, [cajaId])).rows[0];
   if (!caja) throw errorHttp("Esa cuenta de la empresa no existe o está inactiva", 404);
   const previa = await pool.query(
@@ -1427,7 +1458,16 @@ export async function pagarConfirmacionPorOtroMetodo(movimientoId: number, cajaI
       monedaCajaId: s.moneda_id,
     });
     await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_movimiento_id = $1 WHERE id = $2`, [pago.movimiento.id, movimientoId]);
-    return { pagado: true, cuenta: caja.nombre, pagoId: pago.movimiento.id as number };
+    // en bolívares, la comisión del banco (pago móvil) sale también de la cuenta; si falla, el pago igual queda
+    let comision: string | null = null;
+    if (envio) {
+      const cliente = (await pool.query(`SELECT t.nombre FROM terceros t WHERE t.id = $1`, [s.tercero_id])).rows[0]?.nombre ?? "";
+      comision = await cobrarComisionBolivares(caja.id, s.moneda_id, s.monto, envio, `${cliente}${referencia ? ` · ${referencia}` : ""}`, usuarioId).catch((e) => {
+        console.error("[comisión bolívares]", (e as Error).message);
+        return null;
+      });
+    }
+    return { pagado: true, cuenta: caja.nombre, pagoId: pago.movimiento.id as number, comision };
   } catch (err) {
     // no se pudo anotar el pago: la confirmación vuelve a quedar por pagar
     await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_en = NULL, pagado_por = NULL, pagado_medio = NULL, pagado_caja_id = NULL WHERE id = $1`, [movimientoId]);

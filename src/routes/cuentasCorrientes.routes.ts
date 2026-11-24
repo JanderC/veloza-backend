@@ -658,8 +658,9 @@ cuentasCorrientesRouter.post("/movimientos/:id/pagar-otro-metodo", requireAuth, 
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
-    const { cajaId } = z.object({ cajaId: z.number().int().positive() }).parse(req.body);
-    res.json(await pagarConfirmacionPorOtroMetodo(id, cajaId, req.user!.id));
+    // envio: en bolívares, cómo se le mandó (pago móvil P2P, P2C, C2P o transferencia): se descuenta la comisión del banco
+    const { cajaId, envio } = z.object({ cajaId: z.number().int().positive(), envio: z.enum(["P2P", "P2C", "C2P", "TRANSFERENCIA"]).optional() }).parse(req.body);
+    res.json(await pagarConfirmacionPorOtroMetodo(id, cajaId, req.user!.id, envio));
   } catch (err) {
     next(err);
   }

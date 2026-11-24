@@ -7,7 +7,8 @@ import { iniciarModuloWhatsapp } from "./services/whatsapp/trabajadores";
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// 1 MB: las firmas de los contratos viajan como imagen
+app.use(express.json({ limit: "1mb" }));
 app.use("/api", router);
 app.use(errorHandler);
 

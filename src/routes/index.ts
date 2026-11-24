@@ -21,6 +21,7 @@ import { taquillaRouter } from "./taquilla.routes";
 import { taquillasRouter } from "./taquillas.routes";
 import { cajaFuerteRouter } from "./cajaFuerte.routes";
 import { capitalRouter } from "./capital.routes";
+import { contratosRouter } from "./contratos.routes";
 
 export const router = Router();
 
@@ -48,3 +49,5 @@ router.use(/^\/taquilla-\d+(?=\/|$)/, taquillaRouter);
 router.use("/taquillas", taquillasRouter);
 router.use("/caja-fuerte", cajaFuerteRouter);
 router.use("/capital", capitalRouter);
+// contratos y firmas (con la página pública donde se firma con el link)
+router.use("/contratos", contratosRouter);

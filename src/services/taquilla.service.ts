@@ -58,7 +58,9 @@ const SELECT_SOLICITUD = `
          mc.pagado_en, mc.pagado_medio, mc.pagado_caja_id, cp.nombre AS pagado_caja_nombre, up.nombre AS pagado_por_nombre, ur.nombre AS registrado_por_nombre,
          cc.id AS cuenta_id, cc.referencia AS cliente_referencia, m.codigo AS moneda_codigo, m.decimales AS moneda_decimales,
          ch.nombre AS canal_nombre,
-         t.nombre AS cliente_nombre, t.telefono AS cliente_telefono, t.identificacion AS cliente_cedula
+         t.nombre AS cliente_nombre, t.telefono AS cliente_telefono, t.identificacion AS cliente_cedula,
+         -- quién retiró si no fue el cliente (to_jsonb: funciona antes y después de la migración 059)
+         to_jsonb(mc)->>'retira_nombre' AS retira_nombre, to_jsonb(mc)->>'retira_cedula' AS retira_cedula, to_jsonb(mc)->>'retira_telefono' AS retira_telefono
   FROM movimientos_cuenta_corriente mc
   JOIN cuentas_corrientes cc ON cc.id = mc.cuenta_corriente_id
   JOIN monedas m ON m.id = cc.moneda_id
@@ -527,7 +529,20 @@ export async function moverCajaTaquilla(input: { monedaCodigo: string; monto: st
  *   OTROS:       se le pagó por otro método; tampoco toca la caja, queda contado como pago por otros métodos.
  * Una solicitud no se paga dos veces, ni antes de que esté confirmada.
  */
-export async function pagarSolicitud(movimientoId: number, usuarioId: number, medio: "EFECTIVO" | "BANCOLOMBIA" | "OTROS" = "EFECTIVO") {
+/** Quién retira el efectivo cuando no es el mismo cliente. */
+export interface QuienRetira {
+  nombre: string;
+  cedula: string;
+  telefono: string;
+}
+let retiraListo = false;
+async function hayQuienRetira() {
+  if (retiraListo) return true;
+  retiraListo = (await pool.query(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'movimientos_cuenta_corriente' AND column_name = 'retira_nombre') AS hay`)).rows[0].hay as boolean;
+  return retiraListo;
+}
+
+export async function pagarSolicitud(movimientoId: number, usuarioId: number, medio: "EFECTIVO" | "BANCOLOMBIA" | "OTROS" = "EFECTIVO", retira: QuienRetira | null = null) {
   const enEfectivo = medio === "EFECTIVO";
   const caja = await cajaDeTaquilla();
   const previa = await pool.query(
@@ -546,6 +561,8 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
     }
     await exigirSesion(caja.id, p.moneda_id, usuarioId);
   }
+
+  if (retira && enEfectivo && !(await hayQuienRetira())) throw errorHttp("Falta preparar la base para guardar quién retira (migración 059)", 503);
 
   // Se aparta primero: si dos personas tocan "Se pagó" a la vez, solo una sigue
   const apartada = await pool.query(
@@ -573,6 +590,10 @@ export async function pagarSolicitud(movimientoId: number, usuarioId: number, me
       ...(enEfectivo ? { cajaId: caja.id, montoCaja: new Decimal(s.monto).negated().toFixed(4), monedaCajaId: s.moneda_id } : {}),
     });
     await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_movimiento_id = $1 WHERE id = $2`, [pago.movimiento.id, movimientoId]);
+    // retiró otra persona: sus datos quedan con la solicitud
+    if (retira && enEfectivo) {
+      await pool.query(`UPDATE movimientos_cuenta_corriente SET retira_nombre = $1, retira_cedula = $2, retira_telefono = $3 WHERE id = $4`, [retira.nombre || null, retira.cedula || null, retira.telefono || null, movimientoId]);
+    }
   } catch (err) {
     // no se pudo pagar (p. ej. la caja no tiene tanto): la solicitud vuelve a quedar por pagar
     await pool.query(`UPDATE movimientos_cuenta_corriente SET pagado_en = NULL, pagado_por = NULL, pagado_medio = NULL, pagado_caja_id = NULL WHERE id = $1`, [movimientoId]);

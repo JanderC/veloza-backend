@@ -113,8 +113,20 @@ taquillaRouter.post("/solicitudes/:id/pagar", requireAuth, ROLES, async (req, re
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
-    const { medio } = z.object({ medio: z.enum(["EFECTIVO", "BANCOLOMBIA", "OTROS"]).default("EFECTIVO") }).parse(req.body ?? {});
-    res.json(await t(req, () => pagarSolicitud(id, req.user!.id, medio)));
+    const { medio, retira } = z
+      .object({
+        medio: z.enum(["EFECTIVO", "BANCOLOMBIA", "OTROS"]).default("EFECTIVO"),
+        // retira otra persona (no el cliente): opcional, se guarda lo que se haya escrito
+        retira: z
+          .object({
+            nombre: z.string().trim().max(120).default(""),
+            cedula: z.string().trim().max(40).default(""),
+            telefono: z.string().trim().max(40).default(""),
+          })
+          .nullish(),
+      })
+      .parse(req.body ?? {});
+    res.json(await t(req, () => pagarSolicitud(id, req.user!.id, medio, retira && (retira.nombre || retira.cedula || retira.telefono) ? retira : null)));
   } catch (err) {
     next(err);
   }
